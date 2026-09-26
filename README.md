@@ -1,17 +1,27 @@
 # aimap
 
-A worker that watches one or more IMAP mailboxes and copies every new message,
-byte for byte, into an S3 bucket. It runs as a single container and polls on
-an interval, so it deploys on Railway (or anywhere Docker runs) without a
-database or a volume.
+Watches one or more IMAP mailboxes, copies every new message byte for byte
+into an S3 bucket, and classifies it with [TypeSafe Jev](https://typesafe.ai):
+importance, a suggested action and tags. Message metadata and labels go to
+Postgres. Bodies stay in S3 only.
+
+It is one Docker image run as two processes:
+
+- `aimap run` polls IMAP, writes `.eml` files to S3, records their headers in
+  Postgres and queues a `classify` job for each new message.
+- `aimap classify` takes those jobs, reads the message from S3, asks Jev and
+  stores the labels.
+
+The two share nothing but the bucket and the database, so a Jev outage never
+stops ingestion, and each process scales and restarts on its own.
 
 Accounts live in an encrypted file in the same bucket. You add or change
 them with `aimap accounts ...`, and the running worker picks the change up on
 its next poll.
 
-Classification of the stored messages is the next stage. See [Roadmap](#roadmap).
-
 ## How it works
+
+### Ingestion
 
 Every `POLL_INTERVAL_SECONDS` the worker:
 
@@ -19,16 +29,23 @@ Every `POLL_INTERVAL_SECONDS` the worker:
    whether its ETag changed, and the worker downloads the file only when it has.
 2. For each enabled account and mailbox:
    1. Opens the mailbox read-only and reads its `UIDVALIDITY`.
-   2. Loads the checkpoint `state/<account>/<mailbox>.json` from the bucket.
+   2. Loads the mailbox checkpoint from the `mailbox_state` table.
    3. Fetches messages with a UID above the checkpoint using `BODY.PEEK[]`,
       so nothing gets marked as read.
    4. Writes each one to `raw/<account>/<mailbox>/<uidvalidity>/<uid>.eml`.
-   5. Advances the checkpoint after each batch of `BATCH_SIZE` messages.
+   5. After each batch of `BATCH_SIZE` messages, commits one Postgres
+      transaction that records the headers, queues a `classify` job for each
+      message it had not seen, and advances the checkpoint.
 
-The checkpoint lives in the bucket, so the container is stateless. A crash
-mid-batch re-uploads the same keys on the next pass, which is safe. If the
-server changes `UIDVALIDITY`, the worker starts that mailbox over under the new
-value and leaves the old objects alone.
+S3 is written first, Postgres second. A crash before the commit re-uploads the
+same keys on the next pass, and the database upserts do nothing the second
+time. If the server changes `UIDVALIDITY`, the worker starts that mailbox over
+under the new value and leaves the old objects alone. The messages are already
+in Postgres by Message-ID, so they are not classified again.
+
+Versions before Postgres kept checkpoints in `state/<account>/<mailbox>.json`.
+The first sync of a mailbox with no database checkpoint imports that file, so
+an upgrade does not refetch mail. The file is no longer written.
 
 On the first sync of a mailbox it takes the newest `INITIAL_FETCH_COUNT`
 messages (default 100, `0` for the whole mailbox) and follows new mail from
@@ -42,6 +59,51 @@ retrying at full speed. Changing the account, for example with
 next poll. `SIGTERM` stops the worker between batches, and the next start
 resumes from the last checkpoint.
 
+### Classification
+
+`aimap classify` runs `CLASSIFY_CONCURRENCY` threads. Each one claims a
+pending job with `SELECT ... FOR UPDATE SKIP LOCKED`, so no two threads or
+replicas get the same message, and then:
+
+1. Loads the message headers, the profile of its account and the profile's
+   patterns.
+2. Builds the questions and a classifier key, a hash of the questions, the
+   model and the profile. If the message already has a classification with
+   that key, the job is marked done without calling Jev.
+3. Reads the `.eml` from S3 and builds the Jev state: sender, subject, facts
+   computed from headers (bulk mail, reply in a thread, sent by the account
+   itself, attachment names) and the text body cut to `JEV_BODY_CHARS`. The
+   body only exists in memory.
+4. Sends one Jev request with every question in it:
+   - `pattern`, a choice over the profile's known patterns plus
+     `none_of_these`.
+   - `importance`, a score from Low to High against the profile.
+   - `action`, a choice over seven buckets: `discard`, `batch_review`,
+     `skim`, `review`, `verify`, `act_now`, `reply`.
+   - `tag:<name>`, one yes/no question per tag used by the patterns.
+   - `sig:<name>`, generic yes/no signals (written by a person, asks to act,
+     time-sensitive, security event, about a priority, promotional) that add
+     up to a `priority` number.
+5. If Jev picks a pattern with confidence of at least
+   `JEV_PATTERN_CONFIDENCE`, the pattern's labels are copied. Otherwise the
+   independent answers are used and `needs_review` is set. It is also set when
+   the two routes disagree or a confidence is below `JEV_REVIEW_CONFIDENCE`.
+6. Inserts the classification, with the raw Jev answers, and marks the job
+   done in one transaction.
+
+A failed job goes back to the queue after `CLASSIFY_RETRY_SECONDS`, doubling
+on each attempt, and is marked `failed` after `CLASSIFY_MAX_ATTEMPTS`. A
+message whose `.eml` is gone from S3 fails at once. A job left `running` for
+longer than `CLASSIFY_JOB_TIMEOUT_SECONDS`, for example because the process was
+killed, goes back to the queue. `aimap jobs status` shows the counts and
+`aimap jobs retry` requeues the failed ones.
+
+Changing a profile, its patterns or `JEV_MODEL` changes the classifier key.
+New mail uses it right away. To classify stored mail again, run
+`aimap jobs retry --done`. Messages whose key did not change are skipped
+without a Jev call. Every run adds a row to `classifications`, so the old
+labels stay for comparison.
+
 ### Bucket layout
 
 ```
@@ -49,10 +111,76 @@ resumes from the last checkpoint.
   config/accounts.json                              accounts, passwords encrypted
   raw/<account>/<mailbox>/<uidvalidity>/<uid>.eml   Content-Type message/rfc822
                                                     metadata: imap-flags, imap-internaldate
-  state/<account>/<mailbox>.json                    {"uidvalidity", "last_uid", "updated_at"}
+  state/<account>/<mailbox>.json                    legacy checkpoints, read once on upgrade
 ```
 
 Mailbox names are URL-encoded, so `[Gmail]/All Mail` becomes `%5BGmail%5D%2FAll%20Mail`.
+
+### Database
+
+| Table | One row per |
+|---|---|
+| `profiles` | Recipient context Jev classifies against. `default` exists from the start. |
+| `accounts` | Address from the accounts file, with its profile. No credentials. |
+| `mailbox_state` | Account and mailbox: `uidvalidity`, `last_uid`. |
+| `messages` | Account and RFC 822 Message-ID: sender, subject, date, reply and list headers. A message without a Message-ID uses `sha256:<hash of the raw bytes>`. |
+| `message_locations` | Mailbox, UIDVALIDITY and UID where a message is stored, with its S3 key and IMAP flags. The same message in `INBOX` and `[Gmail]/All Mail` has two locations and one `messages` row, so it is classified once. |
+| `jobs` | Message and stage. The only stage today is `classify`. |
+| `patterns` | Known pattern of a profile: insight, importance, action bucket, tags, example senders and subjects. |
+| `classifications` | Message and classifier key: labels, `needs_review`, `priority`, signals, and the raw Jev answers. |
+
+The `message_labels` view joins each message with its latest classification.
+
+`aimap migrate` applies the numbered SQL files in
+[`src/aimap/migrations`](src/aimap/migrations) that are missing, each in its
+own transaction, under an advisory lock. `run` and `classify` exit at startup
+if a migration is missing. To change the schema, add the next numbered file.
+Never edit one that has shipped.
+
+## Profiles and patterns
+
+A profile is a JSON object that Jev reads as `recipient_profile`. Jev keeps no
+memory between requests, so this is how it learns what matters to you. Any
+shape works. This one does well:
+
+```json
+{
+  "who": "Alex, a freelance designer in Lisbon.",
+  "active_priorities": ["Getting paid by clients", "Renewing the studio lease"],
+  "low_value": ["Retail coupons", "Social media digests"]
+}
+```
+
+Patterns are the kinds of mail you already know how to handle. When Jev
+matches one with enough confidence, its labels are used as they are, which is
+more consistent than judging each message from scratch. A CSV has one row per
+pattern, or one row per example if you repeat the insight:
+
+```csv
+insight,importance,action_bucket,tags,example_from,example_subject
+Client invoices,High,act_now,work;billing,Client <billing@client.example>,Invoice 42
+Shop promotions,Low,discard,shopping;promo,Shop <deals@shop.example>,20% off this weekend
+```
+
+`importance` is `Low`, `Medium` or `High`. `action_bucket` is one of the seven
+buckets above. JSON files take a list of objects with the same fields, plus
+`examples` as a list of `{"from", "subject"}`.
+
+```sh
+aimap profiles set default --file profile.json   # create or replace
+aimap patterns import default patterns.csv       # replaces the profile's patterns
+aimap profiles list
+aimap patterns list default
+```
+
+Every account uses `default` until you move it. For separate work and
+personal labels:
+
+```sh
+aimap profiles set work --file work.json
+aimap patterns import work work-patterns.csv
+aimap accounts set-profile me@company.example work
+```
 
 ## Accounts
 
@@ -83,7 +211,8 @@ aimap accounts update me@gmail.com --mailbox INBOX --mailbox Archive
 aimap accounts set-password me@gmail.com
 aimap accounts disable me@gmail.com            # stop syncing, keep the record
 aimap accounts enable me@gmail.com
-aimap accounts remove me@gmail.com             # stored mail and checkpoints stay in the bucket
+aimap accounts remove me@gmail.com             # stored mail stays in the bucket, its rows in Postgres
+aimap accounts set-profile me@gmail.com work   # stored in Postgres, not in the file
 aimap accounts rotate-key
 ```
 
@@ -126,7 +255,8 @@ reads a `.env` file in the working directory. Copy `.env.example` to start.
 | `S3_REGION` | from `AWS_REGION` | |
 | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | AWS default chain | If unset, boto3 reads `AWS_ACCESS_KEY_ID` and the rest of its usual sources. |
 | `S3_FORCE_PATH_STYLE` | `false` | Set `true` for stores without virtual-host buckets, such as SeaweedFS. |
-| `AIMAP_SECRET_KEY` | required for `bucket` | Comma-separated Fernet keys, first one encrypts. `aimap keygen` makes one. |
+| `DATABASE_URL` | required | Postgres connection string, e.g. `postgresql://user:pass@host:5432/aimap`. |
+| `AIMAP_SECRET_KEY` | required for `bucket` | Comma-separated Fernet keys, first one encrypts. `aimap keygen` makes one. Not needed by `classify`, `migrate`, `backfill`, `jobs`, `profiles` or `patterns`. |
 | `ACCOUNTS_SOURCE` | `bucket`, or `env` if `IMAP_USER` is set | |
 | `ACCOUNTS_PATH` | `config/accounts.json` | Relative to `S3_PREFIX`. |
 | `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_HOST`, `IMAP_PORT`, `IMAP_MAILBOX` | | Env-only mode, see above. |
@@ -135,19 +265,42 @@ reads a `.env` file in the working directory. Copy `.env.example` to start.
 | `BATCH_SIZE` | `25` | Messages per checkpoint write. |
 | `IMAP_TIMEOUT_SECONDS` | `60` | Socket timeout. |
 | `MAX_BACKOFF_SECONDS` | `1800` | Upper bound on the retry delay for a failing account. |
+| `JEV_API_KEY` | required for `classify` | TypeSafe API key. `TYPESAFE_API_KEY` also works. |
+| `JEV_MODEL` | `jev-1.13.0` | Pinned so the thresholds below keep meaning the same thing. |
+| `JEV_PATTERN_CONFIDENCE` | `0.5` | Lowest pattern confidence at which its labels are copied. |
+| `JEV_TAG_THRESHOLD` | `0.8` | Probability at which a tag applies when no pattern matched. |
+| `JEV_REVIEW_CONFIDENCE` | `0.4` | Importance or action confidence below which `needs_review` is set. |
+| `JEV_BODY_CHARS` | `1500` | Body text sent to Jev, cut at a word boundary. |
+| `JEV_TIMEOUT_SECONDS` | `120` | Per request. |
+| `CLASSIFY_CONCURRENCY` | `4` | Jev requests in flight per `classify` process. |
+| `CLASSIFY_MAX_ATTEMPTS` | `5` | Attempts before a job is marked `failed`. |
+| `CLASSIFY_RETRY_SECONDS` | `30` | First retry delay, doubled per attempt, capped at one hour. |
+| `CLASSIFY_JOB_TIMEOUT_SECONDS` | `600` | A job `running` longer than this goes back to the queue. |
 | `LOG_LEVEL` | `INFO` | |
 | `LOG_FORMAT` | `json` | `text` for human-readable local logs. |
 
 Logs never include passwords or message content. They do include account
 addresses and UIDs.
 
-## Worker commands
+## Commands
 
 ```
-aimap run      poll forever (container default)
-aimap once     one pass, exit 1 if any account failed
-aimap check    verify S3 access and log in to every enabled account
+aimap run                  poll IMAP forever (container default)
+aimap once                 one pass, exit 1 if any account failed
+aimap check                verify S3 and Postgres, and log in to every enabled account
+
+aimap classify             take classify jobs forever
+aimap classify --once      process every due job, then exit
+aimap jobs status          job counts per stage and status
+aimap jobs retry [--done]  requeue failed jobs, and with --done finished ones too
+
+aimap migrate              apply missing schema migrations
+aimap backfill             record messages that are in S3 but not in Postgres, and queue them
 ```
+
+`backfill` is for mail stored before the database existed, or for rebuilding
+the database from the bucket. It skips keys already recorded, so running it
+twice is safe. It does not touch checkpoints.
 
 ## Run locally
 
@@ -155,37 +308,48 @@ With [uv](https://docs.astral.sh/uv/):
 
 ```sh
 uv sync
-cp .env.example .env                           # S3 settings
+cp .env.example .env                           # S3, DATABASE_URL, JEV_API_KEY
 echo "AIMAP_SECRET_KEY=$(uv run aimap keygen)" >> .env
+uv run aimap migrate
 uv run aimap accounts add me@gmail.com --host imap.gmail.com
-uv run aimap run
+uv run aimap run                               # in one terminal
+uv run aimap classify                          # in another
 ```
 
-Without AWS, Docker Compose starts [SeaweedFS](https://github.com/seaweedfs/seaweedfs)
-as a local S3 store, creates the bucket and runs the worker against it:
+Without AWS, Docker Compose starts Postgres and [SeaweedFS](https://github.com/seaweedfs/seaweedfs)
+as a local S3 store, creates the bucket, applies the migrations and runs both
+processes:
 
 ```sh
 echo "AIMAP_SECRET_KEY=$(docker run --rm $(docker build -q .) keygen)" > .env
+echo "JEV_API_KEY=..." >> .env
 docker compose up --build -d
 docker compose run --rm -it worker accounts add me@gmail.com --host imap.gmail.com
-docker compose logs -f worker                  # picks the account up within a minute
+docker compose run --rm -T worker profiles set default --file - < profile.json
+docker compose logs -f worker classifier       # picks the account up within a minute
 ```
 
 ## Deploy on Railway
 
 1. Create a project and add a service from this GitHub repo. Railway reads
-   `railway.toml` and builds the `Dockerfile`.
+   `railway.toml` and builds the `Dockerfile`. This is the ingest worker.
 2. Add a bucket to the project, or use any S3-compatible bucket you already
-   have.
+   have. Add a Postgres database.
 3. On the service, set `S3_BUCKET`, `S3_ENDPOINT_URL`, `S3_REGION`,
    `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. If you use a Railway bucket,
    reference its variables instead of pasting values, e.g.
    `S3_BUCKET=${{Bucket.BUCKET}}`. The names on the right come from the
-   bucket's Variables tab.
+   bucket's Variables tab. Set `DATABASE_URL=${{Postgres.DATABASE_URL}}`.
 4. Set `AIMAP_SECRET_KEY` to the output of `aimap keygen`. Also store it in
    your password manager.
-5. Deploy. The service needs no public domain or volume. The logs show
+5. Deploy. `railway.toml` runs `aimap migrate` before each deploy starts. The
+   service needs no public domain or volume. The logs show
    `no accounts configured; waiting` until you add one.
+6. Add a second service from the same repo for the classifier. Give it the
+   same S3 and `DATABASE_URL` variables, plus `JEV_API_KEY`, and set its
+   start command to `aimap classify`. It does not need `AIMAP_SECRET_KEY`.
+   To classify faster, raise `CLASSIFY_CONCURRENCY` or add replicas. Jobs are
+   claimed with row locks, so replicas never share one.
 6. Add accounts from your machine with the service's variables injected. The
    bucket endpoint has to be reachable from where you run this:
 
@@ -198,29 +362,40 @@ docker compose logs -f worker                  # picks the account up within a m
    `aimap accounts add ...` there.
 
 The worker logs `account added` and `first sync` within one poll interval,
-with no redeploy.
+with no redeploy. Set a profile with
+`railway run uv run aimap profiles set default --file profile.json`. If the
+bucket already holds mail from before Postgres, run `aimap backfill` once to
+queue it.
 
 ## Development
 
 ```sh
 uv sync
-uv run pytest
+docker run -d --rm --name aimap-pg -p 55432:5432 -e POSTGRES_PASSWORD=pg postgres:16
+TEST_DATABASE_URL=postgresql://postgres:pg@localhost:55432/postgres uv run pytest
 uv run ruff check .
 ```
 
-Tests use [moto](https://github.com/getmoto/moto) for S3 and an in-memory
-fake mailbox. They need no network access and no credentials.
+Tests use [moto](https://github.com/getmoto/moto) for S3, an in-memory fake
+mailbox and a fake Jev client. They need no network access and no
+credentials. Tests that need Postgres create a throwaway database next to
+`TEST_DATABASE_URL`, apply the migrations and drop it at the end. Without
+`TEST_DATABASE_URL` they are skipped, except in CI, where they fail.
 
 ## Roadmap
 
 - [x] IMAP to S3 ingestion loop with checkpoints
 - [x] Encrypted, live-reloaded accounts file
 - [ ] OAuth2 (XOAUTH2) refresh tokens as an alternative to app passwords
-- [ ] Parse stored messages into JSON (headers, text body, attachment list)
-- [ ] Classify each message with [TypeSafe Jev](https://typesafe.ai): importance,
-      suggested action, tags. Results go to `classified/` in the same bucket.
-- [ ] Per-recipient profile and pattern catalogue loaded from the bucket, not
-      from code
+- [x] Message metadata, checkpoints and a job queue in Postgres
+- [x] Classify each message with [TypeSafe Jev](https://typesafe.ai): importance,
+      action bucket, tags, priority
+- [x] Profiles and pattern catalogues in Postgres, one profile per account
+- [ ] Embeddings: an `embed` job stage that reads the `.eml` from S3 and writes
+      to a pgvector table (Railway needs its pgvector Postgres image for this)
+- [ ] Re-run `decide` over stored Jev answers after a threshold change, with
+      no new Jev calls
+- [ ] Feedback loop: turn corrected labels into patterns
 
 ## License
 

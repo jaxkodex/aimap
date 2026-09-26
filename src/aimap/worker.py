@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from aimap.accounts import Account, AccountSource
+from aimap.catalog import Catalog
 from aimap.config import Settings
 from aimap.imap import ImapSource, MailSource
 from aimap.ingest import sync_mailbox
@@ -31,6 +32,7 @@ class _AccountState:
 class Worker:
     settings: Settings
     store: Store
+    catalog: Catalog
     accounts: AccountSource
     source_factory: SourceFactory | None = None
     stop: threading.Event = field(default_factory=threading.Event)
@@ -38,6 +40,7 @@ class Worker:
     failed_accounts: list[str] = field(default_factory=list)  # from the last run_once
     _state: dict[str, _AccountState] = field(default_factory=dict)
     _warned_empty: bool = False
+    _synced: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.source_factory is None:
@@ -46,6 +49,12 @@ class Worker:
 
     def _refresh(self) -> list[Account]:
         current = {a.user: a for a in self.accounts.load()}
+        if current.keys() - self._synced:
+            try:
+                self.catalog.sync_accounts(sorted(current))
+                self._synced = set(current)
+            except Exception as e:  # each account's sync will fail and back off on its own
+                log.error("cannot register accounts in the database", extra={"error": str(e)})
         for user in self._state.keys() - current.keys():
             log.info("account removed or disabled", extra={"account": user})
             del self._state[user]
@@ -96,7 +105,7 @@ class Worker:
                 if self.stop.is_set():
                     break
                 result = sync_mailbox(
-                    source, self.store, acct.user, mailbox,
+                    source, self.store, self.catalog, acct.user, mailbox,
                     initial_fetch_count=self.settings.initial_fetch_count,
                     batch_size=self.settings.batch_size,
                     stop=self.stop,

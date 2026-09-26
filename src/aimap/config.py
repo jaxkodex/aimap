@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from aimap.jev import Thresholds
+
 
 class ConfigError(ValueError):
     pass
@@ -24,8 +26,23 @@ class S3Config:
 
 
 @dataclass(frozen=True)
+class ClassifierSettings:
+    api_key: str | None = field(default=None, repr=False)
+    model: str = "jev-1.13.0"  # pinned so tuned thresholds stay valid
+    thresholds: Thresholds = field(default_factory=Thresholds)
+    body_chars: int = 1500
+    concurrency: int = 4
+    max_attempts: int = 5
+    retry_delay: float = 30.0  # first retry; doubles each attempt, capped at one hour
+    job_timeout: float = 600.0  # a job running longer than this is put back in the queue
+    request_timeout: float = 120.0
+
+
+@dataclass(frozen=True)
 class Settings:
     s3: S3Config
+    database_url: str | None = field(default=None, repr=False)
+    classifier: ClassifierSettings = field(default_factory=ClassifierSettings)
     accounts_source: str = "bucket"  # "bucket" or "env"
     accounts_path: str = "config/accounts.json"
     secret_key: str | None = field(default=None, repr=False)
@@ -65,7 +82,8 @@ def _bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def load_settings(env: Mapping[str, str] | None = None) -> Settings:
+def load_settings(env: Mapping[str, str] | None = None, *, need_accounts: bool = True) -> Settings:
+    """need_accounts=False skips the AIMAP_SECRET_KEY check, for commands that never read the accounts file."""
     env = os.environ if env is None else env
     bucket = env.get("S3_BUCKET", "").strip()
     if not bucket:
@@ -88,7 +106,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if source not in {"bucket", "env"}:
         raise ConfigError(f"ACCOUNTS_SOURCE must be 'bucket' or 'env', got {source!r}")
     secret_key = env.get("AIMAP_SECRET_KEY", "").strip() or None
-    if source == "bucket" and not secret_key:
+    if source == "bucket" and not secret_key and need_accounts:
         raise ConfigError("AIMAP_SECRET_KEY is required for the bucket accounts file (generate: aimap keygen)")
 
     settings = Settings(
@@ -103,6 +121,22 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         max_backoff=_float(env, "MAX_BACKOFF_SECONDS", 1800.0),
         log_level=env.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         log_format=env.get("LOG_FORMAT", "json").strip().lower() or "json",
+        database_url=env.get("DATABASE_URL", "").strip() or None,
+        classifier=ClassifierSettings(
+            api_key=(env.get("JEV_API_KEY") or env.get("TYPESAFE_API_KEY") or "").strip() or None,
+            model=env.get("JEV_MODEL", "").strip() or "jev-1.13.0",
+            thresholds=Thresholds(
+                pattern_confidence=_float(env, "JEV_PATTERN_CONFIDENCE", 0.5),
+                tag_threshold=_float(env, "JEV_TAG_THRESHOLD", 0.8),
+                review_confidence=_float(env, "JEV_REVIEW_CONFIDENCE", 0.4),
+            ),
+            body_chars=_int(env, "JEV_BODY_CHARS", 1500),
+            concurrency=_int(env, "CLASSIFY_CONCURRENCY", 4),
+            max_attempts=_int(env, "CLASSIFY_MAX_ATTEMPTS", 5),
+            retry_delay=_float(env, "CLASSIFY_RETRY_SECONDS", 30.0),
+            job_timeout=_float(env, "CLASSIFY_JOB_TIMEOUT_SECONDS", 600.0),
+            request_timeout=_float(env, "JEV_TIMEOUT_SECONDS", 120.0),
+        ),
     )
     if settings.poll_interval <= 0:
         raise ConfigError("POLL_INTERVAL_SECONDS must be > 0")
@@ -110,6 +144,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         raise ConfigError("BATCH_SIZE must be > 0")
     if settings.initial_fetch_count < 0:
         raise ConfigError("INITIAL_FETCH_COUNT must be >= 0")
+    if settings.classifier.concurrency <= 0:
+        raise ConfigError("CLASSIFY_CONCURRENCY must be > 0")
+    if settings.classifier.max_attempts <= 0:
+        raise ConfigError("CLASSIFY_MAX_ATTEMPTS must be > 0")
     return settings
 
 
