@@ -1,19 +1,8 @@
-"""Configuration from environment variables.
-
-Accounts use numbered suffixes so several mailboxes can share one worker:
-
-    IMAP_USER, IMAP_PASSWORD          account 1
-    IMAP_USER2, IMAP_PASSWORD2        account 2
-    ...
-
-IMAP_HOST, IMAP_PORT and IMAP_MAILBOX can be set per account (IMAP_HOST2) and
-fall back to the unsuffixed value.
-"""
+"""Service settings from environment variables. Accounts are configured separately (see accounts.py)."""
 
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,16 +10,6 @@ from pathlib import Path
 
 class ConfigError(ValueError):
     pass
-
-
-@dataclass(frozen=True)
-class Account:
-    user: str
-    password: str = field(repr=False)
-    host: str
-    port: int = 993
-    mailboxes: tuple[str, ...] = ("INBOX",)
-    suffix: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,8 +25,10 @@ class S3Config:
 
 @dataclass(frozen=True)
 class Settings:
-    accounts: tuple[Account, ...]
     s3: S3Config
+    accounts_source: str = "bucket"  # "bucket" or "env"
+    accounts_path: str = "config/accounts.json"
+    secret_key: str | None = field(default=None, repr=False)
     poll_interval: float = 60.0
     initial_fetch_count: int = 100  # 0 = whole mailbox on first run
     batch_size: int = 25
@@ -55,9 +36,6 @@ class Settings:
     max_backoff: float = 1800.0
     log_level: str = "INFO"
     log_format: str = "json"
-
-
-_USER_KEY = re.compile(r"^IMAP_USER(\d*)$")
 
 
 def _int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -87,41 +65,6 @@ def _bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def load_accounts(env: Mapping[str, str]) -> tuple[Account, ...]:
-    suffixes = sorted(
-        (m.group(1) for k in env if (m := _USER_KEY.match(k)) and env[k].strip()),
-        key=lambda s: int(s or 1),
-    )
-    accounts = []
-    for sfx in suffixes:
-
-        def get(name: str, default: str | None = None, fallback: bool = True, _sfx: str = sfx) -> str | None:
-            value = env.get(name + _sfx, "").strip()
-            if not value and fallback:
-                value = env.get(name, "").strip()
-            return value or default
-
-        user = get("IMAP_USER", fallback=False)
-        password = get("IMAP_PASSWORD", fallback=False)
-        host = get("IMAP_HOST")
-        if not password:
-            raise ConfigError(f"IMAP_PASSWORD{sfx} is required when IMAP_USER{sfx} is set")
-        if not host:
-            raise ConfigError(f"IMAP_HOST{sfx} (or IMAP_HOST) is required")
-        mailboxes = tuple(m.strip() for m in (get("IMAP_MAILBOX", "INBOX") or "").split(",") if m.strip())
-        accounts.append(Account(
-            user=user,
-            password=password.replace(" ", ""),  # app passwords are often pasted with spaces
-            host=host,
-            port=_int({f"IMAP_PORT{sfx}": get("IMAP_PORT", "993")}, f"IMAP_PORT{sfx}", 993),
-            mailboxes=mailboxes or ("INBOX",),
-            suffix=sfx,
-        ))
-    if not accounts:
-        raise ConfigError("No accounts configured: set IMAP_USER and IMAP_PASSWORD")
-    return tuple(accounts)
-
-
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     env = os.environ if env is None else env
     bucket = env.get("S3_BUCKET", "").strip()
@@ -138,9 +81,21 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         secret_access_key=(env.get("S3_SECRET_ACCESS_KEY") or "").strip() or None,
         force_path_style=_bool(env, "S3_FORCE_PATH_STYLE", False),
     )
+
+    source = env.get("ACCOUNTS_SOURCE", "").strip().lower()
+    if not source:
+        source = "env" if env.get("IMAP_USER", "").strip() else "bucket"
+    if source not in {"bucket", "env"}:
+        raise ConfigError(f"ACCOUNTS_SOURCE must be 'bucket' or 'env', got {source!r}")
+    secret_key = env.get("AIMAP_SECRET_KEY", "").strip() or None
+    if source == "bucket" and not secret_key:
+        raise ConfigError("AIMAP_SECRET_KEY is required for the bucket accounts file (generate: aimap keygen)")
+
     settings = Settings(
-        accounts=load_accounts(env),
         s3=s3,
+        accounts_source=source,
+        accounts_path=env.get("ACCOUNTS_PATH", "").strip().strip("/") or "config/accounts.json",
+        secret_key=secret_key,
         poll_interval=_float(env, "POLL_INTERVAL_SECONDS", 60.0),
         initial_fetch_count=_int(env, "INITIAL_FETCH_COUNT", 100),
         batch_size=_int(env, "BATCH_SIZE", 25),

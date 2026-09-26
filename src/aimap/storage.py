@@ -30,6 +30,10 @@ def _seg(value: str) -> str:
     return urllib.parse.quote(value, safe="@.-_+")
 
 
+class ConflictError(RuntimeError):
+    """A conditional write lost: someone else changed the object since it was read."""
+
+
 @dataclass
 class Checkpoint:
     uidvalidity: int
@@ -53,6 +57,38 @@ class Store:
             ),
         )
 
+    def key(self, path: str) -> str:
+        return f"{self.prefix}{path.lstrip('/')}"
+
+    def head_etag(self, key: str) -> str | None:
+        try:
+            return self.s3.head_object(Bucket=self.bucket, Key=key)["ETag"]
+        except ClientError as e:
+            if _missing(e):
+                return None
+            raise
+
+    def get_bytes(self, key: str) -> tuple[bytes, str] | None:
+        """(body, etag), or None if the object does not exist."""
+        try:
+            obj = self.s3.get_object(Bucket=self.bucket, Key=key)
+        except ClientError as e:
+            if _missing(e):
+                return None
+            raise
+        return obj["Body"].read(), obj["ETag"]
+
+    def put_bytes(self, key: str, body: bytes, content_type: str, *, expect_etag: str | None) -> str:
+        """Write only if the object still has expect_etag (None: only if it does not exist yet)."""
+        cond = {"IfMatch": expect_etag} if expect_etag else {"IfNoneMatch": "*"}
+        try:
+            resp = self.s3.put_object(Bucket=self.bucket, Key=key, Body=body, ContentType=content_type, **cond)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") in {"PreconditionFailed", "ConditionalRequestConflict", "412"}:
+                raise ConflictError(key) from e
+            raise
+        return resp["ETag"]
+
     def raw_key(self, account: str, mailbox: str, uidvalidity: int, uid: int) -> str:
         return f"{self.prefix}raw/{_seg(account)}/{_seg(mailbox)}/{uidvalidity}/{uid}.eml"
 
@@ -73,13 +109,10 @@ class Store:
         return key
 
     def get_checkpoint(self, account: str, mailbox: str) -> Checkpoint | None:
-        try:
-            obj = self.s3.get_object(Bucket=self.bucket, Key=self.state_key(account, mailbox))
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
-                return None
-            raise
-        data = json.loads(obj["Body"].read())
+        got = self.get_bytes(self.state_key(account, mailbox))
+        if got is None:
+            return None
+        data = json.loads(got[0])
         return Checkpoint(uidvalidity=int(data["uidvalidity"]), last_uid=int(data["last_uid"]))
 
     def put_checkpoint(self, account: str, mailbox: str, cp: Checkpoint) -> None:
@@ -90,6 +123,10 @@ class Store:
         })
         self.s3.put_object(Bucket=self.bucket, Key=self.state_key(account, mailbox),
                            Body=body.encode(), ContentType="application/json")
+
+
+def _missing(e: ClientError) -> bool:
+    return e.response.get("Error", {}).get("Code") in {"NoSuchKey", "404", "NotFound"}
 
 
 def _ascii(value: str) -> str:

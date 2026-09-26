@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
-from aimap.config import Account
+from aimap.accounts import Account
 
 
 class ImapError(RuntimeError):

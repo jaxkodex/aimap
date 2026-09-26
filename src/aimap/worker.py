@@ -1,4 +1,4 @@
-"""Main loop: poll every account, back off per account on failure, exit cleanly on SIGTERM."""
+"""Main loop: reload accounts, poll each one, back off per account on failure, exit cleanly on SIGTERM."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from aimap.config import Account, Settings
+from aimap.accounts import Account, AccountSource
+from aimap.config import Settings
 from aimap.imap import ImapSource, MailSource
 from aimap.ingest import sync_mailbox
 from aimap.storage import Store
@@ -20,7 +21,8 @@ SourceFactory = Callable[[Account], MailSource]
 
 
 @dataclass
-class _Backoff:
+class _AccountState:
+    account: Account
     failures: int = 0
     next_try: float = 0.0
 
@@ -29,39 +31,60 @@ class _Backoff:
 class Worker:
     settings: Settings
     store: Store
+    accounts: AccountSource
     source_factory: SourceFactory | None = None
     stop: threading.Event = field(default_factory=threading.Event)
     clock: Callable[[], float] = time.monotonic
-    _backoff: dict[str, _Backoff] = field(default_factory=dict)
     failed_accounts: list[str] = field(default_factory=list)  # from the last run_once
+    _state: dict[str, _AccountState] = field(default_factory=dict)
+    _warned_empty: bool = False
 
     def __post_init__(self) -> None:
         if self.source_factory is None:
             timeout = self.settings.imap_timeout
             self.source_factory = lambda acct: ImapSource(acct, timeout=timeout)
 
+    def _refresh(self) -> list[Account]:
+        current = {a.user: a for a in self.accounts.load()}
+        for user in self._state.keys() - current.keys():
+            log.info("account removed or disabled", extra={"account": user})
+            del self._state[user]
+        for user, acct in current.items():
+            st = self._state.get(user)
+            if st is None:
+                log.info("account added", extra={"account": user})
+                self._state[user] = _AccountState(acct)
+            elif st.account != acct:
+                # New password, host or mailboxes: forget old failures and try right away.
+                log.info("account changed", extra={"account": user})
+                self._state[user] = _AccountState(acct)
+        if not current and not self._warned_empty:
+            log.warning("no accounts configured; waiting (add one with `aimap accounts add`)")
+        self._warned_empty = not current
+        return list(current.values())
+
     def run_once(self) -> int:
         """One pass over every account. Returns the number of messages stored."""
         total = 0
         self.failed_accounts = []
-        for acct in self.settings.accounts:
+        for acct in self._refresh():
             if self.stop.is_set():
                 break
-            state = self._backoff.setdefault(acct.user, _Backoff())
-            if self.clock() < state.next_try:
+            st = self._state[acct.user]
+            if self.clock() < st.next_try:
                 continue
             try:
                 total += self._sync_account(acct)
-                if state.failures:
+                if st.failures:
                     log.info("account recovered", extra={"account": acct.user})
-                state.failures, state.next_try = 0, 0.0
+                st.failures, st.next_try = 0, 0.0
             except Exception as e:  # one broken account must not stop the others
-                state.failures += 1
+                st.failures += 1
                 self.failed_accounts.append(acct.user)
-                delay = min(self.settings.max_backoff, self.settings.poll_interval * 2 ** (state.failures - 1))
-                state.next_try = self.clock() + delay
+                delay = min(self.settings.max_backoff, self.settings.poll_interval * 2 ** (st.failures - 1))
+                st.next_try = self.clock() + delay
                 log.error("account sync failed", exc_info=not isinstance(e, OSError),
-                          extra={"account": acct.user, "error": str(e), "failures": state.failures,
+                          extra={"account": acct.user, "error": str(e), "failures": st.failures,
                                  "retry_in_s": round(delay)})
         return total
 
@@ -85,7 +108,7 @@ class Worker:
 
     def run_forever(self) -> None:
         log.info("worker started", extra={
-            "accounts": [a.user for a in self.settings.accounts],
+            "accounts_source": self.settings.accounts_source,
             "poll_interval_s": self.settings.poll_interval,
             "bucket": self.store.bucket,
         })
