@@ -8,3 +8,4 @@ dist/
 # never commit downloaded mail
 data/
 *.eml
+node_modules/
