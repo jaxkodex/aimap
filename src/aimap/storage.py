@@ -3,7 +3,7 @@
 Keys (all under S3_PREFIX):
 
     raw/<account>/<mailbox>/<uidvalidity>/<uid>.eml    original RFC 822 bytes
-    state/<account>/<mailbox>.json                    {"uidvalidity", "last_uid", "updated_at"}
+    state/<account>/<mailbox>.json                    legacy checkpoints, read once to import into Postgres
 
 IMAP UIDs are only unique within one UIDVALIDITY, so it is part of the key.
 Uploads use the same key for the same message, so re-running a batch after a
@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import json
 import urllib.parse
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import boto3
@@ -38,6 +38,14 @@ class ConflictError(RuntimeError):
 class Checkpoint:
     uidvalidity: int
     last_uid: int
+
+
+@dataclass(frozen=True)
+class RawKey:
+    account: str
+    mailbox: str
+    uidvalidity: int
+    uid: int
 
 
 class Store:
@@ -108,21 +116,41 @@ class Store:
         )
         return key
 
-    def get_checkpoint(self, account: str, mailbox: str) -> Checkpoint | None:
+    def get_raw(self, key: str) -> tuple[bytes, dict[str, str]] | None:
+        """(body, user metadata) of a stored message, or None if it is gone."""
+        try:
+            obj = self.s3.get_object(Bucket=self.bucket, Key=key)
+        except ClientError as e:
+            if _missing(e):
+                return None
+            raise
+        return obj["Body"].read(), obj.get("Metadata", {})
+
+    def list_raw(self) -> Iterator[str]:
+        """Every key under raw/, in S3 listing order."""
+        paginator = self.s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=f"{self.prefix}raw/"):
+            for obj in page.get("Contents", []):
+                yield obj["Key"]
+
+    def parse_raw_key(self, key: str) -> RawKey | None:
+        rest = key.removeprefix(f"{self.prefix}raw/")
+        parts = rest.split("/")
+        if rest == key or len(parts) != 4 or not parts[3].endswith(".eml"):
+            return None
+        try:
+            return RawKey(urllib.parse.unquote(parts[0]), urllib.parse.unquote(parts[1]),
+                          int(parts[2]), int(parts[3].removesuffix(".eml")))
+        except ValueError:
+            return None
+
+    def legacy_checkpoint(self, account: str, mailbox: str) -> Checkpoint | None:
+        """Checkpoint written to S3 by versions before Postgres. Only read, to import it once."""
         got = self.get_bytes(self.state_key(account, mailbox))
         if got is None:
             return None
         data = json.loads(got[0])
         return Checkpoint(uidvalidity=int(data["uidvalidity"]), last_uid=int(data["last_uid"]))
-
-    def put_checkpoint(self, account: str, mailbox: str, cp: Checkpoint) -> None:
-        body = json.dumps({
-            "uidvalidity": cp.uidvalidity,
-            "last_uid": cp.last_uid,
-            "updated_at": datetime.now(UTC).isoformat(),
-        })
-        self.s3.put_object(Bucket=self.bucket, Key=self.state_key(account, mailbox),
-                           Body=body.encode(), ContentType="application/json")
 
 
 def _missing(e: ClientError) -> bool:

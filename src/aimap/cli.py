@@ -1,9 +1,24 @@
-"""aimap: copy IMAP mail to S3.
+"""aimap: copy IMAP mail to S3, record it in Postgres and classify it with Jev.
 
-Worker:
+Worker (ingestion):
     aimap run                  poll forever (container default)
     aimap once                 one pass over every account, exit 1 if any failed
-    aimap check                verify S3 access and log in to every account
+    aimap check                verify S3, Postgres and log in to every account
+
+Classifier:
+    aimap classify             take classify jobs forever
+    aimap classify --once      process every due job, then exit
+    aimap jobs status          job counts per stage and status
+    aimap jobs retry [--done]  send failed (and with --done, finished) jobs back to the queue
+
+Database:
+    aimap migrate              apply missing schema migrations
+    aimap backfill             record messages already in S3 and queue them
+
+Profiles (what "important" means, per account):
+    aimap profiles list | show NAME | set NAME --file profile.json
+    aimap patterns list PROFILE | import PROFILE FILE [--format csv|json]
+    aimap accounts set-profile USER PROFILE
 
 Accounts file (live: the running worker picks changes up on its next poll):
     aimap accounts list
@@ -21,12 +36,13 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import logging
 import os
 import sys
 from pathlib import Path
 
-from aimap import __version__, logs
+from aimap import __version__, db, logs, profiles, queue
 from aimap.accounts import (
     Account,
     AccountRecord,
@@ -39,6 +55,9 @@ from aimap.accounts import (
     clean_password,
     parse_mailboxes,
 )
+from aimap.backfill import backfill
+from aimap.catalog import PgCatalog
+from aimap.classifier import Classifier, TypeSafeAsker
 from aimap.config import ConfigError, Settings, load_dotenv, load_settings
 from aimap.crypto import Cipher, CryptoError, generate_key
 from aimap.imap import ImapSource
@@ -55,8 +74,35 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command")
     sub.add_parser("run", help="poll forever")
     sub.add_parser("once", help="one pass, then exit")
-    sub.add_parser("check", help="verify S3 and IMAP connectivity")
+    sub.add_parser("check", help="verify S3, Postgres and IMAP connectivity")
     sub.add_parser("keygen", help="print a new AIMAP_SECRET_KEY")
+    sub.add_parser("migrate", help="apply missing database migrations")
+    sub.add_parser("backfill", help="record messages already in S3 and queue them for classification")
+    cls = sub.add_parser("classify", help="classify queued messages with Jev")
+    cls.add_argument("--once", action="store_true", help="process every due job, then exit")
+
+    jobs = sub.add_parser("jobs", help="inspect the job queue").add_subparsers(dest="action", required=True)
+    jobs.add_parser("status", help="job counts per stage and status")
+    retry = jobs.add_parser("retry", help="send failed jobs back to the queue")
+    retry.add_argument("--done", action="store_true",
+                       help="also requeue finished jobs; messages whose profile, patterns or model changed "
+                            "are classified again, the rest are skipped")
+
+    prof = sub.add_parser("profiles", help="manage classification profiles").add_subparsers(
+        dest="action", required=True)
+    prof.add_parser("list", help="profiles with their account and pattern counts")
+    prof.add_parser("show", help="print a profile as JSON").add_argument("name")
+    pset = prof.add_parser("set", help="create or replace a profile from a JSON file")
+    pset.add_argument("name")
+    pset.add_argument("--file", required=True, help="JSON object, '-' for stdin")
+
+    pat = sub.add_parser("patterns", help="manage a profile's known patterns").add_subparsers(
+        dest="action", required=True)
+    pat.add_parser("list", help="show a profile's patterns").add_argument("profile")
+    pimp = pat.add_parser("import", help="replace a profile's patterns with the contents of a file")
+    pimp.add_argument("profile")
+    pimp.add_argument("file", help="CSV or JSON file, '-' for stdin")
+    pimp.add_argument("--format", choices=["csv", "json"], help="default: from the file extension")
 
     acc = sub.add_parser("accounts", help="manage the encrypted accounts file").add_subparsers(
         dest="action", required=True)
@@ -90,10 +136,19 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("enable", "disable", "remove"):
         acc.add_parser(name, help=f"{name} an account").add_argument("user")
     acc.add_parser("rotate-key", help="re-encrypt every password with the first key")
+    sp = acc.add_parser("set-profile", help="classify an account's mail with another profile (stored in Postgres)")
+    sp.add_argument("user")
+    sp.add_argument("profile")
     return p
 
 
+DB_COMMANDS = {"migrate", "backfill", "classify", "jobs", "profiles", "patterns"}
+
+
 def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["aimap"]:  # the image's ENTRYPOINT is aimap; accept "aimap migrate" as a command too
+        argv = argv[1:]
     args = build_parser().parse_args(argv)
     command = args.command or "run"
 
@@ -102,40 +157,157 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     load_dotenv(Path(args.env_file))
+    set_profile = command == "accounts" and args.action == "set-profile"
     try:
-        settings = load_settings()
+        settings = load_settings(need_accounts=command not in DB_COMMANDS and not set_profile)
     except ConfigError as e:
         logs.setup()
         log.error("invalid configuration", extra={"error": str(e)})
         sys.exit(2)
 
-    if command == "accounts":
+    if command == "accounts" and not set_profile:
         logs.setup(settings.log_level, "text")
         sys.exit(accounts_command(args, settings))
 
-    logs.setup(settings.log_level, settings.log_format)
+    interactive = command in {"jobs", "profiles", "patterns", "accounts", "migrate"}
+    logs.setup(settings.log_level, "text" if interactive else settings.log_format)
+    if not settings.database_url:
+        log.error("DATABASE_URL is required")
+        sys.exit(2)
+
+    if command == "migrate":
+        try:
+            applied = db.migrate(settings.database_url)
+        except Exception as e:
+            log.error("migration failed", extra={"error": str(e)})
+            sys.exit(4)
+        print(f"applied {len(applied)} migration(s)" + (f": {', '.join(applied)}" if applied else ""))
+        return
+
+    try:
+        pool = db.open_pool(settings.database_url, max_size=settings.classifier.concurrency + 2)
+        db.require_current(pool)
+    except db.SchemaError as e:
+        log.error(str(e))
+        sys.exit(4)
+    except Exception as e:
+        log.error("cannot reach the database", extra={"error": str(e)})
+        sys.exit(4)
+
+    try:
+        if command in {"jobs", "profiles", "patterns", "accounts"}:
+            sys.exit(admin_command(command, args, pool))
+        sys.exit(service_command(command, args, settings, pool))
+    finally:
+        pool.close()
+
+
+def service_command(command: str, args: argparse.Namespace, settings: Settings, pool) -> int:
     store = Store(settings.s3)
     try:
         store.check()
     except Exception as e:
         log.error("cannot reach S3 bucket", extra={"bucket": settings.s3.bucket, "error": str(e)})
-        sys.exit(3)
+        return 3
+    catalog = PgCatalog(pool)
+
+    if command == "backfill":
+        res = backfill(store, catalog)
+        log.info("backfill complete", extra=vars(res))
+        return 0
+
+    if command == "classify":
+        cs = settings.classifier
+        if not cs.api_key:
+            log.error("JEV_API_KEY is required for classify")
+            return 2
+        classifier = Classifier(cs, pool, store, lambda: TypeSafeAsker(cs.api_key, cs.model, cs.request_timeout))
+        classifier.install_signal_handlers()
+        if args.once:
+            n = classifier.drain()
+            log.info("classify pass complete", extra={"processed": n})
+        else:
+            classifier.run_forever()
+        return 0
+
     try:
         source = account_source(settings, store)
     except (AccountsError, CryptoError) as e:
         log.error("invalid accounts configuration", extra={"error": str(e)})
-        sys.exit(2)
+        return 2
 
     if command == "check":
-        sys.exit(check(settings, source))
+        log.info("database ok")
+        return check(settings, source)
 
-    worker = Worker(settings, store, source)
+    worker = Worker(settings, store, catalog, source)
     worker.install_signal_handlers()
     if command == "once":
         stored = worker.run_once()
         log.info("pass complete", extra={"stored": stored, "failed_accounts": worker.failed_accounts})
-        sys.exit(1 if worker.failed_accounts else 0)
+        return 1 if worker.failed_accounts else 0
     worker.run_forever()
+    return 0
+
+
+def _read_input(path: str) -> str:
+    return sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+
+
+def admin_command(command: str, args: argparse.Namespace, pool) -> int:
+    try:
+        with pool.connection() as conn:
+            return _admin(command, args, conn)
+    except (profiles.ProfileError, ValueError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
+def _admin(command: str, args: argparse.Namespace, conn) -> int:
+    action = args.action
+    if command == "jobs":
+        if action == "status":
+            rows = queue.counts(conn)
+            if not rows:
+                print("no jobs")
+            for stage, status, n in rows:
+                print(f"{stage:<10} {status:<8} {n}")
+            return 0
+        statuses = ("failed", "done") if args.done else ("failed",)
+        print(f"requeued {queue.requeue(conn, 'classify', statuses)} job(s)")
+        return 0
+
+    if command == "profiles":
+        if action == "list":
+            print(f"{'PROFILE':<20} {'ACCOUNTS':>8} {'PATTERNS':>8}")
+            for name, accounts, patterns in profiles.list_all(conn):
+                print(f"{name:<20} {accounts:>8} {patterns:>8}")
+            return 0
+        if action == "show":
+            print(json.dumps(profiles.get(conn, args.name).profile, indent=2, ensure_ascii=False))
+            return 0
+        profiles.put(conn, args.name, json.loads(_read_input(args.file)))
+        print(f"saved profile {args.name}")
+        return 0
+
+    if command == "patterns":
+        profile = profiles.get(conn, args.profile)
+        if action == "list":
+            for p in profiles.patterns(conn, profile.id):
+                print(f"{p.importance:<6} {p.action_bucket:<12} {p.insight}  [{'; '.join(p.tags)}]")
+            return 0
+        fmt = args.format or ("json" if args.file.endswith(".json") else "csv")
+        items = profiles.parse_patterns(_read_input(args.file), fmt)
+        with conn.transaction():
+            profiles.replace_patterns(conn, profile.id, items)
+        print(f"imported {len(items)} pattern(s) into {args.profile}")
+        return 0
+
+    if command == "accounts" and action == "set-profile":
+        profiles.assign(conn, args.user, args.profile)
+        print(f"{args.user} now uses profile {args.profile}")
+        return 0
+    raise AssertionError((command, action))
 
 
 def account_source(settings: Settings, store: Store) -> AccountSource:
@@ -283,7 +455,7 @@ def _accounts(args, settings: Settings, cipher: Cipher, repo: AccountsRepo) -> i
             doc.records.remove(doc.require(args.user))
 
         repo.modify(remove)
-        print(f"removed {args.user} (its stored mail and checkpoint stay in the bucket)")
+        print(f"removed {args.user} (its stored mail stays in the bucket, its rows in Postgres)")
         return 0
 
     if action == "rotate-key":

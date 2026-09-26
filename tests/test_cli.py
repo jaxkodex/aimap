@@ -93,3 +93,8 @@ def test_password_prompt_needs_tty_or_stdin_flag(env, monkeypatch, capsys):
 def test_keygen(capsys):
     cli.main(["keygen"])
     Cipher(capsys.readouterr().out.strip())  # a valid key
+
+
+def test_leading_program_name_is_ignored(capsys):
+    cli.main(["aimap", "keygen"])  # Railway may pass "aimap migrate" to an image whose ENTRYPOINT is aimap
+    Cipher(capsys.readouterr().out.strip())
