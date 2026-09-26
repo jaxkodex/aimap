@@ -3,6 +3,7 @@ name = "aimap"
 version = "0.1.0"
 description = "Worker that pulls email over IMAP, archives the raw messages in S3, and (next) classifies them."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.34",

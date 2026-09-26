@@ -221,3 +221,7 @@ fake mailbox. They need no network access and no credentials.
       suggested action, tags. Results go to `classified/` in the same bucket.
 - [ ] Per-recipient profile and pattern catalogue loaded from the bucket, not
       from code
+
+## License
+
+[MIT](LICENSE)
