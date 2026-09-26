@@ -1,0 +1,52 @@
+# Local stack: SeaweedFS as an S3-compatible bucket, plus the worker.
+# IMAP settings come from .env; the S3 settings below override anything there.
+x-s3-env: &s3-env
+  S3_BUCKET: aimap
+  S3_ENDPOINT_URL: http://s3:8333
+  S3_REGION: us-east-1
+  S3_ACCESS_KEY_ID: local
+  S3_SECRET_ACCESS_KEY: local
+  S3_FORCE_PATH_STYLE: "true"
+
+services:
+  s3:
+    image: chrislusf/seaweedfs:latest
+    command: server -s3 -dir=/data -ip.bind=0.0.0.0
+    ports: ["8333:8333"]
+    volumes: [s3data:/data]
+
+  create-bucket:
+    build: .
+    depends_on: [s3]
+    environment: *s3-env
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        import os, time, boto3
+        s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT_URL"], region_name="us-east-1",
+                          aws_access_key_id="local", aws_secret_access_key="local")
+        for _ in range(60):  # wait for SeaweedFS to accept requests
+            try:
+                s3.create_bucket(Bucket="aimap")
+            except s3.exceptions.BucketAlreadyOwnedByYou:
+                pass
+            except Exception:
+                time.sleep(1)
+                continue
+            s3.head_bucket(Bucket="aimap")
+            break
+        else:
+            raise SystemExit("S3 not ready after 60s")
+
+  worker:
+    build: .
+    depends_on:
+      create-bucket: { condition: service_completed_successfully }
+    env_file: .env
+    environment:
+      <<: *s3-env
+      LOG_FORMAT: text
+    restart: unless-stopped
+
+volumes:
+  s3data:
