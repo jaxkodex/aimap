@@ -5,14 +5,16 @@ into an S3 bucket, and classifies it with [TypeSafe Jev](https://typesafe.ai):
 importance, a suggested action and tags. Message metadata and labels go to
 Postgres. Bodies stay in S3 only.
 
-It is one Docker image run as two processes:
+It is one Docker image run as three processes:
 
 - `aimap run` polls IMAP, writes `.eml` files to S3, records their headers in
   Postgres and queues a `classify` job for each new message.
 - `aimap classify` takes those jobs, reads the message from S3, asks Jev and
   stores the labels.
+- `aimap api` serves the labelled mail over HTTP to the app, for users signed
+  in with Firebase Authentication.
 
-The two share nothing but the bucket and the database, so a Jev outage never
+They share nothing but the bucket and the database, so a Jev outage never
 stops ingestion, and each process scales and restarts on its own.
 
 Accounts live in an encrypted file in the same bucket. You add or change
@@ -136,6 +138,51 @@ The `message_labels` view joins each message with its latest classification.
 own transaction, under an advisory lock. `run` and `classify` exit at startup
 if a migration is missing. To change the schema, add the next numbered file.
 Never edit one that has shipped.
+
+### API
+
+`aimap api` listens on `$PORT` (default 8080). It only reads: nothing in the
+mailbox, the bucket or the labels changes through it.
+
+| Route | Returns |
+|---|---|
+| `GET /healthz` | `{"ok": true}` when Postgres answers. No token needed. |
+| `GET /me` | The signed-in user's Firebase uid and email. |
+| `GET /accounts` | Each account with its profile, message count and unread count. |
+| `GET /home` | The Home screen: a brief, `act_now`, `waiting` and `sorted` sections. |
+| `GET /messages` | Messages newest first, with their latest labels. |
+| `GET /messages/{id}` | One message: metadata, labels, signals, reasons and mailboxes. |
+| `GET /messages/{id}/body` | The text body, read from S3 for that request and not kept. |
+
+`/home` takes `account`, `days` (the window, default 7) and `new_since` (for
+the brief's `new` count, default 24 hours ago). `act_now` holds the `act_now`
+and `verify` buckets, highest `priority` first. `waiting` holds `reply`, the
+longest waiting first. Everything else is grouped under its pattern's insight,
+its first tag or its bucket. Reasons ("Mentions a deadline") and group
+summaries ("Uber, AWS Billing + 1 more") are templates over stored signals and
+senders, so the API never calls Jev. Mail the account sent itself is left out.
+
+`/messages` takes `account`, `filter` (`all`, `unread`, `flagged`,
+`needs_review`), `limit` (up to 200) and `cursor`. Pass the response's
+`next_cursor` to get the next page. It is `null` on the last one.
+
+Unread and flagged come from the IMAP flags seen at ingestion. Mail read in
+another client still shows as unread. `waiting` means Jev thinks someone
+expects an answer, not that no reply was sent: Sent mail isn't matched yet.
+
+#### Sign-in
+
+The app signs in with the [Firebase Authentication](https://firebase.google.com/docs/auth)
+SDK (Google, Apple or any provider you enable) and sends the ID token on every
+request as `Authorization: Bearer <token>`. The API checks its signature
+against Google's certificates, which it caches for as long as their headers
+allow, and checks that its audience and issuer are `FIREBASE_PROJECT_ID`.
+Tokens last an hour and the SDK renews them, so the API keeps no sessions.
+
+Any Google account can sign in to a Firebase project, so the API also requires
+a verified email listed in `AIMAP_ALLOWED_EMAILS`. A valid token for another
+email gets `403`. A missing, expired or forged one gets `401`. With an empty
+list nobody gets in, and `aimap api` refuses to start.
 
 ## Profiles and patterns
 
@@ -276,6 +323,11 @@ reads a `.env` file in the working directory. Copy `.env.example` to start.
 | `CLASSIFY_MAX_ATTEMPTS` | `5` | Attempts before a job is marked `failed`. |
 | `CLASSIFY_RETRY_SECONDS` | `30` | First retry delay, doubled per attempt, capped at one hour. |
 | `CLASSIFY_JOB_TIMEOUT_SECONDS` | `600` | A job `running` longer than this goes back to the queue. |
+| `FIREBASE_PROJECT_ID` | required for `api` | The Firebase project the app signs in to. |
+| `AIMAP_ALLOWED_EMAILS` | required for `api` | Comma-separated emails that may use the API. |
+| `PORT` | `8080` | Port `api` listens on. Railway sets it. |
+| `API_HOST` | `0.0.0.0` | |
+| `API_POOL_SIZE` | `10` | Postgres connections for `api`. |
 | `LOG_LEVEL` | `INFO` | |
 | `LOG_FORMAT` | `json` | `text` for human-readable local logs. |
 
@@ -293,6 +345,8 @@ aimap classify             take classify jobs forever
 aimap classify --once      process every due job, then exit
 aimap jobs status          job counts per stage and status
 aimap jobs retry [--done]  requeue failed jobs, and with --done finished ones too
+
+aimap api                  serve the HTTP API on $PORT
 
 aimap migrate              apply missing schema migrations
 aimap backfill             record messages that are in S3 but not in Postgres, and queue them
@@ -314,15 +368,18 @@ uv run aimap migrate
 uv run aimap accounts add me@gmail.com --host imap.gmail.com
 uv run aimap run                               # in one terminal
 uv run aimap classify                          # in another
+uv run aimap api                               # and a third, with FIREBASE_PROJECT_ID and AIMAP_ALLOWED_EMAILS
 ```
 
 Without AWS, Docker Compose starts Postgres and [SeaweedFS](https://github.com/seaweedfs/seaweedfs)
-as a local S3 store, creates the bucket, applies the migrations and runs both
-processes:
+as a local S3 store, creates the bucket, applies the migrations and runs all
+three processes, with the API on http://localhost:8080:
 
 ```sh
 echo "AIMAP_SECRET_KEY=$(docker run --rm $(docker build -q .) keygen)" > .env
 echo "JEV_API_KEY=..." >> .env
+echo "FIREBASE_PROJECT_ID=..." >> .env
+echo "AIMAP_ALLOWED_EMAILS=me@gmail.com" >> .env
 docker compose up --build -d
 docker compose run --rm -it worker accounts add me@gmail.com --host imap.gmail.com
 docker compose run --rm -T worker profiles set default --file - < profile.json
@@ -350,7 +407,12 @@ docker compose logs -f worker classifier       # picks the account up within a m
    start command to `aimap classify`. It does not need `AIMAP_SECRET_KEY`.
    To classify faster, raise `CLASSIFY_CONCURRENCY` or add replicas. Jobs are
    claimed with row locks, so replicas never share one.
-6. Add accounts from your machine with the service's variables injected. The
+7. Add a third service from the same repo for the API, with start command
+   `aimap api`. Give it the same S3 and `DATABASE_URL` variables, plus
+   `FIREBASE_PROJECT_ID` and `AIMAP_ALLOWED_EMAILS`. It needs neither
+   `AIMAP_SECRET_KEY` nor `JEV_API_KEY`. Generate a public domain for it and
+   set its healthcheck path to `/healthz`. Railway sets `PORT`.
+8. Add accounts from your machine with the service's variables injected. The
    bucket endpoint has to be reachable from where you run this:
 
    ```sh
@@ -391,6 +453,7 @@ credentials. Tests that need Postgres create a throwaway database next to
 - [x] Classify each message with [TypeSafe Jev](https://typesafe.ai): importance,
       action bucket, tags, priority
 - [x] Profiles and pattern catalogues in Postgres, one profile per account
+- [x] Read-only HTTP API for the app, behind Firebase Authentication
 - [ ] Embeddings: an `embed` job stage that reads the `.eml` from S3 and writes
       to a pgvector table (Railway needs its pgvector Postgres image for this)
 - [ ] Re-run `decide` over stored Jev answers after a threshold change, with

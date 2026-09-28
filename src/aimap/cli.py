@@ -11,6 +11,9 @@ Classifier:
     aimap jobs status          job counts per stage and status
     aimap jobs retry [--done]  send failed (and with --done, finished) jobs back to the queue
 
+API (for the app; Firebase ID token required):
+    aimap api                  serve HTTP on $PORT
+
 Database:
     aimap migrate              apply missing schema migrations
     aimap backfill             record messages already in S3 and queue them
@@ -78,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("keygen", help="print a new AIMAP_SECRET_KEY")
     sub.add_parser("migrate", help="apply missing database migrations")
     sub.add_parser("backfill", help="record messages already in S3 and queue them for classification")
+    sub.add_parser("api", help="serve the HTTP API for the app")
     cls = sub.add_parser("classify", help="classify queued messages with Jev")
     cls.add_argument("--once", action="store_true", help="process every due job, then exit")
 
@@ -142,7 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-DB_COMMANDS = {"migrate", "backfill", "classify", "jobs", "profiles", "patterns"}
+DB_COMMANDS = {"migrate", "backfill", "classify", "jobs", "profiles", "patterns", "api"}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -185,7 +189,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     try:
-        pool = db.open_pool(settings.database_url, max_size=settings.classifier.concurrency + 2)
+        size = settings.api.pool_size if command == "api" else settings.classifier.concurrency + 2
+        pool = db.open_pool(settings.database_url, max_size=size)
         db.require_current(pool)
     except db.SchemaError as e:
         log.error(str(e))
@@ -215,6 +220,9 @@ def service_command(command: str, args: argparse.Namespace, settings: Settings, 
         res = backfill(store, catalog)
         log.info("backfill complete", extra=vars(res))
         return 0
+
+    if command == "api":
+        return serve_api(settings, pool, store)
 
     if command == "classify":
         cs = settings.classifier
@@ -247,6 +255,23 @@ def service_command(command: str, args: argparse.Namespace, settings: Settings, 
         log.info("pass complete", extra={"stored": stored, "failed_accounts": worker.failed_accounts})
         return 1 if worker.failed_accounts else 0
     worker.run_forever()
+    return 0
+
+
+def serve_api(settings: Settings, pool, store: Store) -> int:
+    from aimap.api import create_app, serve
+    from aimap.auth import FirebaseVerifier
+
+    a = settings.api
+    if not a.firebase_project_id:
+        log.error("FIREBASE_PROJECT_ID is required for api")
+        return 2
+    if not a.allowed_emails:
+        log.error("AIMAP_ALLOWED_EMAILS is required for api: nobody could sign in")
+        return 2
+    app = create_app(pool, store, FirebaseVerifier(a.firebase_project_id, a.allowed_emails))
+    log.info("api starting", extra={"port": a.port, "allowed_emails": len(a.allowed_emails)})
+    serve(app, a.host, a.port, settings.log_level)
     return 0
 
 

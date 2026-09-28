@@ -39,10 +39,20 @@ class ClassifierSettings:
 
 
 @dataclass(frozen=True)
+class ApiSettings:
+    firebase_project_id: str | None = None
+    allowed_emails: frozenset[str] = frozenset()  # Firebase lets any Google account sign in; this is the gate
+    host: str = "0.0.0.0"
+    port: int = 8080
+    pool_size: int = 10
+
+
+@dataclass(frozen=True)
 class Settings:
     s3: S3Config
     database_url: str | None = field(default=None, repr=False)
     classifier: ClassifierSettings = field(default_factory=ClassifierSettings)
+    api: ApiSettings = field(default_factory=ApiSettings)
     accounts_source: str = "bucket"  # "bucket" or "env"
     accounts_path: str = "config/accounts.json"
     secret_key: str | None = field(default=None, repr=False)
@@ -137,6 +147,14 @@ def load_settings(env: Mapping[str, str] | None = None, *, need_accounts: bool =
             job_timeout=_float(env, "CLASSIFY_JOB_TIMEOUT_SECONDS", 600.0),
             request_timeout=_float(env, "JEV_TIMEOUT_SECONDS", 120.0),
         ),
+        api=ApiSettings(
+            firebase_project_id=env.get("FIREBASE_PROJECT_ID", "").strip() or None,
+            allowed_emails=frozenset(e.strip().lower() for e in env.get("AIMAP_ALLOWED_EMAILS", "").split(",")
+                                     if e.strip()),
+            host=env.get("API_HOST", "").strip() or "0.0.0.0",
+            port=_int(env, "PORT", 8080),
+            pool_size=_int(env, "API_POOL_SIZE", 10),
+        ),
     )
     if settings.poll_interval <= 0:
         raise ConfigError("POLL_INTERVAL_SECONDS must be > 0")
@@ -146,6 +164,8 @@ def load_settings(env: Mapping[str, str] | None = None, *, need_accounts: bool =
         raise ConfigError("INITIAL_FETCH_COUNT must be >= 0")
     if settings.classifier.concurrency <= 0:
         raise ConfigError("CLASSIFY_CONCURRENCY must be > 0")
+    if settings.api.pool_size <= 0:
+        raise ConfigError("API_POOL_SIZE must be > 0")
     if settings.classifier.max_attempts <= 0:
         raise ConfigError("CLASSIFY_MAX_ATTEMPTS must be > 0")
     return settings

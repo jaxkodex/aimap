@@ -1,0 +1,62 @@
+from datetime import UTC, datetime, timedelta
+
+from aimap import home
+from aimap.home import Item
+
+NOW = datetime(2026, 9, 28, 9, 0, tzinfo=UTC)
+ME = "me@example.com"
+
+
+def item(n, bucket, *, hours_ago=1, sender=None, priority=0.0, insight=None, tags=(), signals=None, unread=True,
+         from_email=None):
+    return Item(message_id=n, account=ME, from_email=from_email or f"s{n}@example.com", from_name=sender,
+                subject=f"m{n}", sent_at=NOW - timedelta(hours=hours_ago), unread=unread, importance="Medium",
+                action_bucket=bucket, tags=list(tags), insight=insight, priority=priority, signals=signals or {})
+
+
+def test_sections_split_by_bucket():
+    out = home.build([
+        item(1, "act_now", priority=5), item(2, "verify", priority=8), item(3, "reply", hours_ago=5),
+        item(4, "reply", hours_ago=48), item(5, "skim"), item(6, "discard"),
+    ], NOW - timedelta(hours=24))
+    assert [c["message_id"] for c in out["act_now"]] == [2, 1]  # highest priority first
+    assert [c["message_id"] for c in out["waiting"]] == [4, 3]  # longest waiting first
+    assert out["waiting"][0]["waiting_since"] == NOW - timedelta(hours=48)
+    assert {g["name"] for g in out["sorted"]} == {"To skim", "Can discard"}
+    assert out["brief"] == {"new": 5, "act_now": 2, "waiting": 2, "sorted": 2, "unclassified": 0,
+                            "text": "5 new emails. 2 need you now and 2 people are waiting on a reply."}
+
+
+def test_own_mail_and_unlabelled_mail():
+    out = home.build([item(1, "reply", from_email=ME), item(2, None)], NOW - timedelta(hours=24))
+    assert out["waiting"] == [] and out["sorted"] == []
+    assert out["brief"]["new"] == 1 and out["brief"]["unclassified"] == 1
+
+
+def test_groups_use_insight_then_tag_then_bucket_and_summarise_senders():
+    items = [
+        item(1, "review", insight="Finance & receipts", sender="AWS Billing"),
+        item(2, "review", insight="Finance & receipts", sender="Uber", unread=False),
+        item(3, "review", insight="Finance & receipts", sender="Uber"),
+        item(4, "review", insight="Finance & receipts", sender="Stripe"),
+        item(5, "skim", tags=["travel"]),
+        item(6, "batch_review"),
+    ]
+    groups = {g["name"]: g for g in home.build(items, NOW)["sorted"]}
+    assert set(groups) == {"Finance & receipts", "travel", "Alerts"}
+    fin = groups["Finance & receipts"]
+    assert (fin["count"], fin["unread"]) == (4, 3)
+    assert fin["summary"] == "Uber, AWS Billing + 1 more"
+    assert list(groups)[0] == "Finance & receipts"  # biggest group first
+
+
+def test_reasons_come_from_strong_signals_in_fixed_order():
+    assert home.reasons({"real_person": 0.9, "time_sensitive": 0.7, "security_event": 0.1, "promotional": 0.9,
+                         "pattern_confidence": 0.8}) == ["Mentions a deadline", "Written to you by a person"]
+    assert home.reasons({}) == []
+
+
+def test_brief_text():
+    assert home.brief_text(0, 0, 0) == "Nothing new. You're all caught up."
+    assert home.brief_text(1, 1, 1) == "1 new email. 1 needs you now and 1 person is waiting on a reply."
+    assert home.brief_text(12, 0, 0) == "12 new emails. None of them need you right now."
