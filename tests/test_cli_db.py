@@ -83,3 +83,13 @@ def test_backfill_then_jobs(env, monkeypatch, capsys, pool):
 
 def test_classify_needs_api_key(env, monkeypatch):
     assert run(monkeypatch, "classify", "--once") == 2
+
+
+@pytest.mark.parametrize("env_vars", [{}, {"FIREBASE_PROJECT_ID": "proj"}])
+def test_api_refuses_to_start_without_firebase_settings(env, monkeypatch, env_vars):
+    for k in ("FIREBASE_PROJECT_ID", "AIMAP_ALLOWED_EMAILS"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env_vars.items():
+        monkeypatch.setenv(k, v)
+    assert run(monkeypatch, "migrate") == 0
+    assert run(monkeypatch, "api") == 2

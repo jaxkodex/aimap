@@ -63,3 +63,13 @@ def test_env_accounts_sorted_numerically():
 def test_invalid_env_accounts(env, msg):
     with pytest.raises(AccountsError, match=msg):
         EnvAccounts(env)
+
+
+def test_api_settings():
+    s = load_settings({"S3_BUCKET": "b", "FIREBASE_PROJECT_ID": "proj", "PORT": "9000",
+                       "AIMAP_ALLOWED_EMAILS": " Me@Example.com, ,you@example.com "}, need_accounts=False)
+    assert s.api.firebase_project_id == "proj" and s.api.port == 9000
+    assert s.api.allowed_emails == frozenset({"me@example.com", "you@example.com"})
+    assert load_settings({"S3_BUCKET": "b"}, need_accounts=False).api.allowed_emails == frozenset()
+    with pytest.raises(ConfigError, match="API_POOL_SIZE"):
+        load_settings({"S3_BUCKET": "b", "API_POOL_SIZE": "0"}, need_accounts=False)

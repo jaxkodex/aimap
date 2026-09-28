@@ -48,7 +48,25 @@ export default defineRailway(() => {
     },
   });
 
+  // HTTP API for the app: same image again. Reads Postgres and the bucket, and
+  // checks Firebase ID tokens. Needs FIREBASE_PROJECT_ID and
+  // AIMAP_ALLOWED_EMAILS, a public domain and a /healthz healthcheck, set on
+  // the service. No AIMAP_SECRET_KEY or JEV_API_KEY.
+  const api = service("api", {
+    source: github("jaxkodex/aimap"),
+    build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
+    preDeploy: "aimap migrate",
+    start: "aimap api",
+    deploy: {
+      restartPolicyType: "ON_FAILURE",
+      restartPolicyMaxRetries: 10,
+      limitOverride: {
+        containers: { cpu: 0.5, memoryBytes: 500000000 },
+      },
+    },
+  });
+
   return project("aimap", {
-    resources: [aimap, classify],
+    resources: [aimap, classify, api],
   });
 });

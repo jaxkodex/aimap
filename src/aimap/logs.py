@@ -7,7 +7,7 @@ import logging
 import sys
 from datetime import UTC, datetime
 
-_STANDARD = set(vars(logging.makeLogRecord({}))) | {"message", "asctime"}
+_STANDARD = set(vars(logging.makeLogRecord({}))) | {"message", "asctime", "color_message"}  # uvicorn adds the last
 
 
 class JsonFormatter(logging.Formatter):
