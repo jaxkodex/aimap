@@ -54,15 +54,25 @@ def decode_cursor(cursor: str) -> tuple[datetime, int]:
 def home_items(conn: Connection, since: datetime, account: str | None = None) -> list[Item]:
     rows = conn.execute(f"""
         SELECT m.id, a.address, m.from_email, m.from_name, m.subject, m.sent_at, {_UNREAD},
-               c.importance, c.action_bucket, c.tags, c.insight, c.needs_review, c.priority, c.signals
+               c.importance, c.action_bucket, c.tags, c.insight, c.needs_review, c.priority, c.signals, p.name
         FROM messages m
         JOIN accounts a ON a.id = m.account_id
+        JOIN profiles p ON p.id = a.profile_id
         {_LATEST}
         WHERE {_AT} >= %(since)s AND (%(account)s::text IS NULL OR a.address = %(account)s)""",
                         {"since": since, "account": account}).fetchall()
     return [Item(message_id=r[0], account=r[1], from_email=r[2], from_name=r[3], subject=r[4], sent_at=r[5],
                  unread=r[6], importance=r[7], action_bucket=r[8], tags=r[9] or [], insight=r[10],
-                 needs_review=bool(r[11]), priority=r[12] or 0.0, signals=r[13] or {}) for r in rows]
+                 needs_review=bool(r[11]), priority=r[12] or 0.0, signals=r[13] or {}, profile=r[14]) for r in rows]
+
+
+def sorted_at(conn: Connection, account: str | None = None) -> datetime | None:
+    """When the newest classification was stored, for one account or all of them."""
+    return conn.execute("""
+        SELECT max(c.created_at) FROM classifications c
+        JOIN messages m ON m.id = c.message_id
+        JOIN accounts a ON a.id = m.account_id
+        WHERE %(account)s::text IS NULL OR a.address = %(account)s""", {"account": account}).fetchone()[0]
 
 
 def list_messages(conn: Connection, *, account: str | None = None, filter: str = "all", cursor: str | None = None,

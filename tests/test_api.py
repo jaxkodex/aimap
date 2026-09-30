@@ -86,6 +86,15 @@ def test_home(client, seeded):
     assert body["sorted"] == [{"name": "newsletter", "count": 1, "unread": 0, "latest_at": body["sorted"][0]
                                ["latest_at"], "summary": "News"}]
     assert body["brief"]["new"] == 4 and body["brief"]["unclassified"] == 1
+    assert body["act_now"][0]["profile"] == "default"
+    assert body["brief"]["sorted_at"] is not None
+    assert len(body["brief"]["by_hour"]) == 24
+
+
+def test_home_traffic_uses_the_time_zone(client, seeded):
+    body = client.get("/home", params={"tz": "Pacific/Kiritimati"}, headers=AUTH).json()
+    assert [h["hour"] for h in body["brief"]["by_hour"]] == list(range(24))
+    assert client.get("/home", params={"tz": "Mars/Olympus"}, headers=AUTH).status_code == 400
 
 
 def test_home_filters_by_account(client, seeded):
