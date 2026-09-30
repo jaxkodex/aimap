@@ -154,13 +154,21 @@ mailbox, the bucket or the labels changes through it.
 | `GET /messages/{id}` | One message: metadata, labels, signals, reasons and mailboxes. |
 | `GET /messages/{id}/body` | The text body, read from S3 for that request and not kept. |
 
-`/home` takes `account`, `days` (the window, default 7) and `new_since` (for
-the brief's `new` count, default 24 hours ago). `act_now` holds the `act_now`
+`/home` takes `account`, `days` (the window, default 7), `new_since` (for
+the brief's `new` count, default 24 hours ago) and `tz`. `act_now` holds the `act_now`
 and `verify` buckets, highest `priority` first. `waiting` holds `reply`, the
 longest waiting first. Everything else is grouped under its pattern's insight,
 its first tag or its bucket. Reasons ("Mentions a deadline") and group
 summaries ("Uber, AWS Billing + 1 more") are templates over stored signals and
 senders, so the API never calls Jev. Mail the account sent itself is left out.
+Each card carries its account's `profile` name ("work", "personal"), which the
+app can show as a short account label.
+
+The brief also has `sorted_at`, when the newest classification was stored, and
+`by_hour`, today's traffic: 24 rows, one per hour, each counting the messages
+that arrived in `act_now`, `waiting`, `sorted` and `unclassified`. "Today" and
+its hours follow `tz`, an IANA time zone name such as `Europe/Madrid` (default
+`UTC`). An unknown zone is a 400.
 
 `/messages` takes `account`, `filter` (`all`, `unread`, `flagged`,
 `needs_review`), `limit` (up to 200) and `cursor`. Pass the response's

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -73,12 +74,20 @@ def create_app(pool: ConnectionPool, store: Store, verifier: Verifier) -> FastAP
         account: str | None = None,
         days: Annotated[int, Query(ge=1, le=90)] = 7,
         new_since: datetime | None = None,
+        tz: str = "UTC",
     ) -> dict:
-        """Sections over the last `days` days. `new` in the brief counts mail since `new_since` (default 24h)."""
+        """Sections over the last `days` days. `new` in the brief counts mail since `new_since` (default 24h).
+
+        `tz` is an IANA time zone name ("Europe/Madrid"). It decides which hours `brief.by_hour` calls today."""
+        try:
+            zone = ZoneInfo(tz)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise HTTPException(400, f"unknown time zone: {tz}") from e
         now = datetime.now(UTC)
         with pool.connection() as conn:
             items = inbox.home_items(conn, now - timedelta(days=days), account)
-        return home.build(items, new_since or now - timedelta(hours=24))
+            last = inbox.sorted_at(conn, account)
+        return home.build(items, new_since or now - timedelta(hours=24), now=now, tz=zone, sorted_at=last)
 
     @app.get("/messages")
     def messages(

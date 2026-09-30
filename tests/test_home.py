@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from aimap import home
 from aimap.home import Item
@@ -23,8 +24,9 @@ def test_sections_split_by_bucket():
     assert [c["message_id"] for c in out["waiting"]] == [4, 3]  # longest waiting first
     assert out["waiting"][0]["waiting_since"] == NOW - timedelta(hours=48)
     assert {g["name"] for g in out["sorted"]} == {"To skim", "Can discard"}
-    assert out["brief"] == {"new": 5, "act_now": 2, "waiting": 2, "sorted": 2, "unclassified": 0,
-                            "text": "5 new emails. 2 need you now and 2 people are waiting on a reply."}
+    brief = {k: v for k, v in out["brief"].items() if k != "by_hour"}
+    assert brief == {"new": 5, "act_now": 2, "waiting": 2, "sorted": 2, "unclassified": 0, "sorted_at": None,
+                     "text": "5 new emails. 2 need you now and 2 people are waiting on a reply."}
 
 
 def test_own_mail_and_unlabelled_mail():
@@ -60,3 +62,29 @@ def test_brief_text():
     assert home.brief_text(0, 0, 0) == "Nothing new. You're all caught up."
     assert home.brief_text(1, 1, 1) == "1 new email. 1 needs you now and 1 person is waiting on a reply."
     assert home.brief_text(12, 0, 0) == "12 new emails. None of them need you right now."
+
+
+def test_by_hour_counts_todays_arrivals_per_section():
+    items = [item(1, "act_now", hours_ago=1), item(2, "reply", hours_ago=1), item(3, "skim", hours_ago=1),
+             item(4, "discard", hours_ago=3), item(5, None, hours_ago=3), item(6, "reply", hours_ago=10),
+             item(7, "act_now", from_email=ME)]
+    hours = home.build(items, NOW, now=NOW)["brief"]["by_hour"]
+    assert [h["hour"] for h in hours] == list(range(24))
+    assert hours[8] == {"hour": 8, "act_now": 1, "waiting": 1, "sorted": 1, "unclassified": 0}
+    assert hours[6] == {"hour": 6, "act_now": 0, "waiting": 0, "sorted": 1, "unclassified": 1}
+    # 23:00 yesterday and the account's own mail are not today's traffic.
+    assert sum(h[k] for h in hours for k in ("act_now", "waiting", "sorted", "unclassified")) == 5
+
+
+def test_by_hour_follows_the_callers_time_zone():
+    madrid = ZoneInfo("Europe/Madrid")  # UTC+2 in September
+    hours = home.build([item(1, "reply", hours_ago=10)], NOW, now=NOW, tz=madrid)["brief"]["by_hour"]
+    assert hours[1]["waiting"] == 1  # 23:00 UTC yesterday is 01:00 today in Madrid
+
+
+def test_cards_carry_the_account_profile_and_brief_carries_sorted_at():
+    card = Item(message_id=1, account=ME, from_email="a@example.com", from_name=None, subject="s", sent_at=NOW,
+                unread=True, action_bucket="act_now", profile="work")
+    out = home.build([card], NOW, now=NOW, sorted_at=NOW)
+    assert out["act_now"][0]["profile"] == "work"
+    assert out["brief"]["sorted_at"] == NOW

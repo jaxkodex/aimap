@@ -5,6 +5,10 @@
               means "someone expects an answer", not "you have not replied".
     sorted    everything else, grouped by pattern insight, first tag, or bucket.
 
+The brief also carries today's traffic: for each hour of today in the caller's
+time zone, how many messages arrived in each section. `sorted_at` is when the
+newest classification was stored, passed in by the caller.
+
 Messages the account sent itself never appear. Reasons and summaries are
 templates over stored fields, so they cost no inference.
 """
@@ -13,7 +17,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, tzinfo
 from typing import Any
 
 ACT_NOW = ("act_now", "verify")
@@ -57,6 +61,7 @@ class Item:
     needs_review: bool = False
     priority: float = 0.0
     signals: dict[str, Any] = field(default_factory=dict)
+    profile: str | None = None
 
     @property
     def sender(self) -> str:
@@ -90,7 +95,7 @@ def group_summary(items: list[Item], senders: int = 2) -> str:
 
 def _card(item: Item) -> dict[str, Any]:
     return {
-        "message_id": item.message_id, "account": item.account, "sender": item.sender,
+        "message_id": item.message_id, "account": item.account, "profile": item.profile, "sender": item.sender,
         "from_email": item.from_email, "subject": item.subject, "sent_at": item.sent_at, "unread": item.unread,
         "action_bucket": item.action_bucket, "importance": item.importance, "priority": item.priority,
         "needs_review": item.needs_review, "reasons": reasons(item.signals),
@@ -101,7 +106,30 @@ def _ts(item: Item) -> float:
     return item.sent_at.timestamp() if item.sent_at else 0.0
 
 
-def build(items: list[Item], new_since: datetime) -> dict[str, Any]:
+def section(item: Item) -> str:
+    """Which Home section a message lands in: act_now, waiting, sorted, or unclassified."""
+    if not item.action_bucket:
+        return "unclassified"
+    if item.action_bucket in ACT_NOW:
+        return "act_now"
+    return "waiting" if item.action_bucket in WAITING else "sorted"
+
+
+def by_hour(items: list[Item], now: datetime, tz: tzinfo) -> list[dict[str, int]]:
+    """24 rows, one per hour of today in `tz`, counting the messages that arrived in each section."""
+    today = now.astimezone(tz).date()
+    hours = [{"hour": h, "act_now": 0, "waiting": 0, "sorted": 0, "unclassified": 0} for h in range(24)]
+    for i in items:
+        if i.from_self or not i.sent_at:
+            continue
+        local = i.sent_at.astimezone(tz)
+        if local.date() == today:
+            hours[local.hour][section(i)] += 1
+    return hours
+
+
+def build(items: list[Item], new_since: datetime, *, now: datetime | None = None, tz: tzinfo = UTC,
+          sorted_at: datetime | None = None) -> dict[str, Any]:
     """Home sections for the labelled messages in the window. Unlabelled ones only count as new."""
     inbox = [i for i in items if not i.from_self]
     labelled = [i for i in inbox if i.action_bucket]
@@ -124,6 +152,8 @@ def build(items: list[Item], new_since: datetime) -> dict[str, Any]:
             "new": new, "act_now": len(act), "waiting": len(waiting), "sorted": len(rest),
             "unclassified": len(inbox) - len(labelled),
             "text": brief_text(new, len(act), len(waiting)),
+            "sorted_at": sorted_at,
+            "by_hour": by_hour(inbox, now or datetime.now(UTC), tz),
         },
         "act_now": [_card(i) for i in act],
         "waiting": [{**_card(i), "waiting_since": i.sent_at} for i in waiting],
