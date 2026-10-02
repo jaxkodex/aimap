@@ -16,4 +16,4 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 WORKDIR /app
 USER aimap
 ENTRYPOINT ["aimap"]
-CMD ["run"]
+CMD ["all"]

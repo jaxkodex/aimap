@@ -1,5 +1,6 @@
 # Local stack: SeaweedFS as an S3-compatible bucket, Postgres, the ingest worker,
-# the classifier and the API. IMAP and Jev settings come from .env; the S3 and database
+# the classifier and the API, each in its own container (the image's default, `all`, runs
+# the three in one). IMAP and Jev settings come from .env; the S3 and database
 # settings below override anything there.
 x-s3-env: &s3-env
   S3_BUCKET: aimap
@@ -62,6 +63,7 @@ services:
 
   worker:
     build: .
+    command: ["run"]
     depends_on:
       create-bucket: { condition: service_completed_successfully }
       migrate: { condition: service_completed_successfully }
