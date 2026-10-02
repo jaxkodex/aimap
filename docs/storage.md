@@ -26,6 +26,7 @@ Mailbox names are URL-encoded, so `[Gmail]/All Mail` becomes `%5BGmail%5D%2FAll%
 | `jobs` | Message and stage. The only stage today is `classify`. |
 | `patterns` | Known pattern of a profile: insight, importance, action bucket, tags, example senders and subjects. |
 | `classifications` | Message and classifier key: labels, `needs_review`, `priority`, signals, and the raw Jev answers. |
+| `message_state` | Message you marked `handled` or `later` in the app, with when and which verified email did it. Undo deletes the row, so no row means normal. Nothing here is sent to IMAP. |
 
 The `message_labels` view joins each message with its latest classification.
 

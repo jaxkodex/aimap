@@ -12,7 +12,8 @@ It is one Docker image with three processes:
 - `aimap classify` takes those jobs, reads the message from S3, asks Jev and
   stores the labels.
 - `aimap api` serves the labelled mail over HTTP to the app, for users signed
-  in with Firebase Authentication.
+  in with Firebase Authentication, and records what the user did with a
+  message (handled, later). The mailbox itself is only ever read.
 
 They share nothing but the bucket and the database, so a Jev outage never
 stops ingestion. `aimap all`, the image's default, runs the three as child
@@ -62,7 +63,8 @@ Running it:
 - [x] Classify each message with [TypeSafe Jev](https://typesafe.ai): importance,
       action bucket, tags, priority
 - [x] Profiles and pattern catalogues in Postgres, one profile per account
-- [x] Read-only HTTP API for the app, behind Firebase Authentication
+- [x] HTTP API for the app, behind Firebase Authentication. It reads the
+      mailbox only; the one write is aimap's own Handled / Later state
 - [ ] Embeddings: an `embed` job stage that reads the `.eml` from S3 and writes
       to a pgvector table (Railway needs its pgvector Postgres image for this)
 - [ ] Re-run `decide` over stored Jev answers after a threshold change, with
