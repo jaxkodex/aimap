@@ -1,4 +1,4 @@
-import { defineRailway, preserve, project, service } from "railway/iac";
+import { defineRailway, github, preserve, project, service } from "railway/iac";
 
 // This repository manages only its own resources in the environment. Other
 // repositories export their own partial name.
@@ -12,6 +12,8 @@ export default defineRailway(() => {
   // poll IMAP. To classify faster, raise CLASSIFY_CONCURRENCY. Needs a public
   // domain, set on the service; Railway sets PORT.
   const aimap = service("aimap", {
+    // Deploys on every push to main (the link the classify service used to have)
+    source: github("jaxkodex/aimap"),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     preDeploy: "aimap migrate",
     start: "aimap all",
