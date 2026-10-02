@@ -1,16 +1,20 @@
-"""Read queries behind the API: messages with their latest labels, per account.
+"""Queries behind the API: messages with their latest labels, per account.
 
 A message is unread when none of its locations carries \\Seen, and flagged when
 any carries \\Flagged. Flags are the ones seen at ingestion, so they go stale
 when mail is read elsewhere until flag sync lands. Lists page by (time, id),
 newest first, with an opaque cursor.
+
+Everything here reads, except `set_state`: the one write aimap does, and it only
+touches aimap's own message_state table. The mailbox, the bucket and the labels
+never change.
 """
 
 from __future__ import annotations
 
 import base64
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import Connection
 
@@ -25,6 +29,7 @@ _LATEST = """
 _UNREAD = r"NOT EXISTS (SELECT 1 FROM message_locations l WHERE l.message_id = m.id AND '\Seen' = ANY(l.flags))"
 _FLAGGED = r"EXISTS (SELECT 1 FROM message_locations l WHERE l.message_id = m.id AND '\Flagged' = ANY(l.flags))"
 _AT = "coalesce(m.sent_at, m.created_at)"
+_STATE = "LEFT JOIN message_state s ON s.message_id = m.id"
 
 FILTERS = {
     "all": "",
@@ -54,16 +59,48 @@ def decode_cursor(cursor: str) -> tuple[datetime, int]:
 def home_items(conn: Connection, since: datetime, account: str | None = None) -> list[Item]:
     rows = conn.execute(f"""
         SELECT m.id, a.address, m.from_email, m.from_name, m.subject, m.sent_at, {_UNREAD},
-               c.importance, c.action_bucket, c.tags, c.insight, c.needs_review, c.priority, c.signals, p.name
+               c.importance, c.action_bucket, c.tags, c.insight, c.needs_review, c.priority, c.signals, p.name,
+               s.state, s.changed_at
         FROM messages m
         JOIN accounts a ON a.id = m.account_id
         JOIN profiles p ON p.id = a.profile_id
         {_LATEST}
+        {_STATE}
         WHERE {_AT} >= %(since)s AND (%(account)s::text IS NULL OR a.address = %(account)s)""",
                         {"since": since, "account": account}).fetchall()
     return [Item(message_id=r[0], account=r[1], from_email=r[2], from_name=r[3], subject=r[4], sent_at=r[5],
                  unread=r[6], importance=r[7], action_bucket=r[8], tags=r[9] or [], insight=r[10],
-                 needs_review=bool(r[11]), priority=r[12] or 0.0, signals=r[13] or {}, profile=r[14]) for r in rows]
+                 needs_review=bool(r[11]), priority=r[12] or 0.0, signals=r[13] or {}, profile=r[14],
+                 state=r[15], state_changed_at=r[16]) for r in rows]
+
+
+def handled_since(conn: Connection, since: datetime, account: str | None = None) -> int:
+    """How many messages were marked handled since `since`, for one account or all of them."""
+    return conn.execute("""
+        SELECT count(*) FROM message_state s
+        JOIN messages m ON m.id = s.message_id
+        JOIN accounts a ON a.id = m.account_id
+        WHERE s.state = 'handled' AND s.changed_at >= %(since)s
+          AND (%(account)s::text IS NULL OR a.address = %(account)s)""",
+                        {"since": since, "account": account}).fetchone()[0]
+
+
+def set_state(conn: Connection, message_id: int, state: Literal["handled", "later"] | None,
+              *, changed_by: str) -> dict[str, Any] | None:
+    """Mark a message handled or later, or clear it with `state=None` (undo). None if there is no such message.
+
+    Idempotent, and every call refreshes `changed_at`, so the newest 'later' sorts last on Home."""
+    if conn.execute("SELECT 1 FROM messages WHERE id = %s", (message_id,)).fetchone() is None:
+        return None
+    if state is None:
+        conn.execute("DELETE FROM message_state WHERE message_id = %s", (message_id,))
+        return {"message_id": message_id, "state": None, "changed_at": None}
+    r = conn.execute("""
+        INSERT INTO message_state (message_id, state, changed_by) VALUES (%s, %s, %s)
+        ON CONFLICT (message_id) DO UPDATE
+            SET state = excluded.state, changed_by = excluded.changed_by, changed_at = now()
+        RETURNING state, changed_at""", (message_id, state, changed_by)).fetchone()
+    return {"message_id": message_id, "state": r[0], "changed_at": r[1]}
 
 
 def sorted_at(conn: Connection, account: str | None = None) -> datetime | None:
@@ -110,10 +147,11 @@ def get_message(conn: Connection, message_id: int) -> dict[str, Any] | None:
         SELECT m.id, a.address, m.rfc822_message_id, m.from_email, m.from_name, m.subject, m.sent_at,
                m.in_reply_to, m.has_list_headers, {_UNREAD}, {_FLAGGED},
                c.importance, c.action_bucket, c.tags, c.insight, c.needs_review, c.priority, c.signals,
-               c.created_at
+               c.created_at, s.state
         FROM messages m
         JOIN accounts a ON a.id = m.account_id
         {_LATEST}
+        {_STATE}
         WHERE m.id = %s""", (message_id,)).fetchone()
     if r is None:
         return None
@@ -123,7 +161,7 @@ def get_message(conn: Connection, message_id: int) -> dict[str, Any] | None:
     return {
         "message_id": r[0], "account": r[1], "rfc822_message_id": r[2], "from_email": r[3],
         "sender": r[4] or r[3] or "(unknown)", "subject": r[5], "sent_at": r[6], "in_reply_to": r[7],
-        "bulk": r[8], "unread": r[9], "flagged": r[10],
+        "bulk": r[8], "unread": r[9], "flagged": r[10], "state": r[19],
         "labels": None if r[12] is None else {
             "importance": r[11], "action_bucket": r[12], "tags": r[13] or [], "insight": r[14],
             "needs_review": r[15], "priority": r[16], "signals": r[17] or {}, "classified_at": r[18],

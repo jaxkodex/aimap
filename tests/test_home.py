@@ -9,10 +9,11 @@ ME = "me@example.com"
 
 
 def item(n, bucket, *, hours_ago=1, sender=None, priority=0.0, insight=None, tags=(), signals=None, unread=True,
-         from_email=None):
+         from_email=None, state=None, state_minutes_ago=0):
     return Item(message_id=n, account=ME, from_email=from_email or f"s{n}@example.com", from_name=sender,
                 subject=f"m{n}", sent_at=NOW - timedelta(hours=hours_ago), unread=unread, importance="Medium",
-                action_bucket=bucket, tags=list(tags), insight=insight, priority=priority, signals=signals or {})
+                action_bucket=bucket, tags=list(tags), insight=insight, priority=priority, signals=signals or {},
+                state=state, state_changed_at=NOW - timedelta(minutes=state_minutes_ago) if state else None)
 
 
 def test_sections_split_by_bucket():
@@ -25,8 +26,10 @@ def test_sections_split_by_bucket():
     assert out["waiting"][0]["waiting_since"] == NOW - timedelta(hours=48)
     assert {g["name"] for g in out["sorted"]} == {"To skim", "Can discard"}
     brief = {k: v for k, v in out["brief"].items() if k != "by_hour"}
-    assert brief == {"new": 5, "act_now": 2, "waiting": 2, "sorted": 2, "unclassified": 0, "sorted_at": None,
+    assert brief == {"new": 5, "act_now": 2, "waiting": 2, "sorted": 2, "unclassified": 0, "handled_today": 0,
+                     "sorted_at": None,
                      "text": "5 new emails. 2 need you now and 2 people are waiting on a reply."}
+    assert out["act_now"][0]["state"] is None
 
 
 def test_own_mail_and_unlabelled_mail():
@@ -80,6 +83,35 @@ def test_by_hour_follows_the_callers_time_zone():
     madrid = ZoneInfo("Europe/Madrid")  # UTC+2 in September
     hours = home.build([item(1, "reply", hours_ago=10)], NOW, now=NOW, tz=madrid)["brief"]["by_hour"]
     assert hours[1]["waiting"] == 1  # 23:00 UTC yesterday is 01:00 today in Madrid
+
+
+def test_handled_messages_leave_act_now_and_waiting():
+    out = home.build([
+        item(1, "act_now", priority=5), item(2, "verify", priority=8, state="handled"),
+        item(3, "reply"), item(4, "reply", hours_ago=48, state="handled"), item(5, "skim", state="handled"),
+    ], NOW - timedelta(hours=24), handled_today=3)
+    assert [c["message_id"] for c in out["act_now"]] == [1]
+    assert [c["message_id"] for c in out["waiting"]] == [3]
+    assert out["brief"]["act_now"] == 1 and out["brief"]["waiting"] == 1
+    assert out["brief"]["handled_today"] == 3
+    assert out["brief"]["new"] == 4  # handled mail still arrived (message 4 is older than the window)
+    # A handled message keeps its sorted group.
+    assert out["sorted"] == [{"name": "To skim", "count": 1, "unread": 1,
+                              "latest_at": NOW - timedelta(hours=1), "summary": "s5@example.com"}]
+
+
+def test_later_messages_stay_in_their_section_and_sort_last():
+    out = home.build([
+        item(1, "act_now", priority=9, state="later", state_minutes_ago=10),
+        item(2, "act_now", priority=8, state="later", state_minutes_ago=1),  # marked last, so it goes last
+        item(3, "act_now", priority=1),
+        item(4, "reply", hours_ago=2, state="later", state_minutes_ago=5),
+        item(5, "reply", hours_ago=1),
+    ], NOW - timedelta(hours=24))
+    assert [c["message_id"] for c in out["act_now"]] == [3, 1, 2]
+    assert [c["message_id"] for c in out["waiting"]] == [5, 4]
+    assert [c["state"] for c in out["act_now"]] == [None, "later", "later"]
+    assert out["brief"]["act_now"] == 3 and out["brief"]["waiting"] == 2  # later still counts
 
 
 def test_cards_carry_the_account_profile_and_brief_carries_sorted_at():
