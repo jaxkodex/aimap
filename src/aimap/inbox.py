@@ -147,9 +147,10 @@ def get_message(conn: Connection, message_id: int) -> dict[str, Any] | None:
         SELECT m.id, a.address, m.rfc822_message_id, m.from_email, m.from_name, m.subject, m.sent_at,
                m.in_reply_to, m.has_list_headers, {_UNREAD}, {_FLAGGED},
                c.importance, c.action_bucket, c.tags, c.insight, c.needs_review, c.priority, c.signals,
-               c.created_at, s.state
+               c.created_at, s.state, p.name
         FROM messages m
         JOIN accounts a ON a.id = m.account_id
+        JOIN profiles p ON p.id = a.profile_id
         {_LATEST}
         {_STATE}
         WHERE m.id = %s""", (message_id,)).fetchone()
@@ -159,7 +160,7 @@ def get_message(conn: Connection, message_id: int) -> dict[str, Any] | None:
         SELECT mailbox, flags, s3_key FROM message_locations WHERE message_id = %s
         ORDER BY ingested_at DESC, id DESC""", (message_id,)).fetchall()
     return {
-        "message_id": r[0], "account": r[1], "rfc822_message_id": r[2], "from_email": r[3],
+        "message_id": r[0], "account": r[1], "profile": r[20], "rfc822_message_id": r[2], "from_email": r[3],
         "sender": r[4] or r[3] or "(unknown)", "subject": r[5], "sent_at": r[6], "in_reply_to": r[7],
         "bulk": r[8], "unread": r[9], "flagged": r[10], "state": r[19],
         "labels": None if r[12] is None else {

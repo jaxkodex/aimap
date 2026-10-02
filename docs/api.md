@@ -11,7 +11,7 @@ and the labels are never changed, and IMAP stays read-only.
 | `GET /accounts` | Each account with its profile, message count and unread count. |
 | `GET /home` | The Home screen: a brief, `act_now`, `waiting` and `sorted` sections. |
 | `GET /messages` | Messages newest first, with their latest labels. |
-| `GET /messages/{id}` | One message: metadata, labels, signals, reasons and mailboxes. |
+| `GET /messages/{id}` | One message: metadata, labels, signals, reasons, mailboxes and state. |
 | `GET /messages/{id}/body` | The text body, read from S3 for that request and not kept. |
 | `POST /messages/{id}/actions` | Marks a message handled or later, or undoes it. Returns its new state. |
 
@@ -23,7 +23,8 @@ its first tag or its bucket. Reasons ("Mentions a deadline") and group
 summaries ("Uber, AWS Billing + 1 more") are templates over stored signals and
 senders, so the API never calls Jev. Mail the account sent itself is left out.
 Each card carries its account's `profile` name ("work", "personal"), which the
-app can show as a short account label.
+app can show as a short account label. `GET /messages/{id}` carries the same
+`profile`, next to its `account`, so the detail screen can show that label too.
 
 A message you marked handled is left out of `act_now` and `waiting` and of
 their brief counts. One pushed to later stays in its section but sorts after

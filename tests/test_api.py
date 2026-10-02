@@ -202,6 +202,7 @@ def test_message_detail_and_body(client, seeded):
     mid = seeded["Sign-off needed"]
     m = client.get(f"/messages/{mid}", headers=AUTH).json()
     assert m["sender"] == "Priya" and m["labels"]["action_bucket"] == "act_now"
+    assert m["account"] == ME and m["profile"] == "default"  # the same profile name Home cards carry
     assert m["labels"]["reasons"] == ["Mentions a deadline"]
     assert m["mailboxes"] == [{"mailbox": "INBOX", "flags": []}] and "s3_key" not in m
     assert client.get(f"/messages/{mid}/body", headers=AUTH).json()["text"] == "Body of message 1."
