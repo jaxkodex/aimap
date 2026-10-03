@@ -1,4 +1,4 @@
-import { defineRailway, github, preserve, project, service } from "railway/iac";
+import { defineRailway, github, postgres, preserve, project, service } from "railway/iac";
 
 // This repository manages only its own resources in the environment. Other
 // repositories export their own partial name.
@@ -6,6 +6,8 @@ import { defineRailway, github, preserve, project, service } from "railway/iac";
 export const partial = "aimap";
 
 export default defineRailway(() => {
+  const db = postgres("Postgres");
+
   // One service runs everything: `aimap all` starts the ingest worker, the
   // classifier and the HTTP API as child processes, and exits (so Railway
   // restarts it) if any of them stops. Only one replica: each copy would also
@@ -30,7 +32,7 @@ export default defineRailway(() => {
     // Imported variables: kept out of source, remote values untouched
     env: {
       AIMAP_SECRET_KEY: preserve(),
-      DATABASE_URL: preserve(),
+      DATABASE_URL: db.env.DATABASE_URL,
       S3_ACCESS_KEY_ID: preserve(),
       S3_BUCKET: preserve(),
       S3_ENDPOINT_URL: preserve(),
@@ -43,6 +45,6 @@ export default defineRailway(() => {
   });
 
   return project("aimap", {
-    resources: [aimap],
+    resources: [aimap, db],
   });
 });
