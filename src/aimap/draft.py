@@ -54,6 +54,7 @@ class DraftConfig:
     model: str
     timeout: float
     max_tokens: int
+    reasoning_effort: str = "low"  # reasoning models burn the token budget on chain-of-thought otherwise
 
     def is_configured(self) -> bool:
         return self.api_key is not None and bool(self.model)
@@ -148,12 +149,17 @@ def generate_draft(
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": config.max_tokens,
                 "temperature": 0.7,
+                "reasoning_effort": config.reasoning_effort,
             },
             timeout=config.timeout,
         )
         response.raise_for_status()
         data = response.json()
         body = data["choices"][0]["message"]["content"].strip()
+        if not body:
+            finish_reason = data["choices"][0].get("finish_reason")
+            log.warning("draft model returned empty body", extra={"finish_reason": finish_reason})
+            raise ModelRequestFailed("The model returned an empty reply.")
     except requests.Timeout as e:
         raise ModelTimeout("The model timed out.") from e
     except requests.RequestException as e:

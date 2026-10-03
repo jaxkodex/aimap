@@ -40,11 +40,12 @@ class ClassifierSettings:
 
 @dataclass(frozen=True)
 class DraftSettings:
-    base_url: str = "https://api.deepseek.com/v1"
+    base_url: str = "https://api.deepseek.com"
     api_key: str | None = field(default=None, repr=False)
-    model: str = "deepseek-chat"
+    model: str = "deepseek-flash"
     timeout: float = 45.0
-    max_tokens: int = 700
+    max_tokens: int = 2000
+    reasoning_effort: str = "low"
 
 
 @dataclass(frozen=True)
@@ -165,11 +166,12 @@ def load_settings(env: Mapping[str, str] | None = None, *, need_accounts: bool =
             port=_int(env, "PORT", 8080),
             pool_size=_int(env, "API_POOL_SIZE", 10),
             draft=DraftSettings(
-                base_url=env.get("AIMAP_DRAFT_BASE_URL", "").strip() or "https://api.deepseek.com/v1",
+                base_url=env.get("AIMAP_DRAFT_BASE_URL", "").strip() or "https://api.deepseek.com",
                 api_key=env.get("AIMAP_DRAFT_API_KEY", "").strip() or None,
-                model=env.get("AIMAP_DRAFT_MODEL", "").strip() or "deepseek-chat",
+                model=env.get("AIMAP_DRAFT_MODEL", "").strip() or "deepseek-flash",
                 timeout=_float(env, "AIMAP_DRAFT_TIMEOUT", 45.0),
-                max_tokens=_int(env, "AIMAP_DRAFT_MAX_TOKENS", 700),
+                max_tokens=_int(env, "AIMAP_DRAFT_MAX_TOKENS", 2000),
+                reasoning_effort=env.get("AIMAP_DRAFT_EFFORT", "").strip() or "low",
             ),
         ),
     )

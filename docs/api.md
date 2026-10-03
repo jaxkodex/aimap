@@ -134,7 +134,7 @@ Returns 200 with:
   "cc": [],
   "subject": "RE: Jorge - Solera Interview - SW Mgr",
   "body": "Hi Javier,\n\nTuesday or Wednesday after 15:00 both work...",
-  "model": "deepseek-chat",
+  "model": "deepseek-flash",
   "used_message_ids": [4211, 4188],
   "created_at": "2025-06-02T07:10:00Z"
 }

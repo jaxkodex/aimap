@@ -37,11 +37,12 @@ reads a `.env` file in the working directory. Copy `.env.example` to start.
 | `PORT` | `8080` | Port `api` listens on. Railway sets it. |
 | `API_HOST` | `0.0.0.0` | |
 | `API_POOL_SIZE` | `10` | Postgres connections for `api`. |
-| `AIMAP_DRAFT_BASE_URL` | `https://api.deepseek.com/v1` | Base URL for draft generation. `/chat/completions` is appended. |
+| `AIMAP_DRAFT_BASE_URL` | `https://api.deepseek.com` | Base URL for draft generation. `/chat/completions` is appended. |
 | `AIMAP_DRAFT_API_KEY` | unset | API key for draft generation. Unset turns the feature off. |
-| `AIMAP_DRAFT_MODEL` | `deepseek-chat` | Model name for draft generation. |
+| `AIMAP_DRAFT_MODEL` | `deepseek-flash` | Model id for draft generation (DeepSeek's API ids, e.g. `deepseek-flash`, `deepseek-v4-pro`; `DeepSeek-V4.1-Flash` is only the display name). |
 | `AIMAP_DRAFT_TIMEOUT` | `45` | Seconds for the draft HTTP call. |
-| `AIMAP_DRAFT_MAX_TOKENS` | `700` | Response cap for draft generation. |
+| `AIMAP_DRAFT_MAX_TOKENS` | `2000` | Response cap for draft generation. High enough for reasoning models that spend tokens on chain-of-thought first. |
+| `AIMAP_DRAFT_EFFORT` | `low` | `reasoning_effort` sent to the model (`low`, `high`, `max`). `low` keeps drafts fast and cheap; without it a reasoning model can burn the whole token budget on chain-of-thought and return an empty body. |
 | `LOG_LEVEL` | `INFO` | |
 | `LOG_FORMAT` | `json` | `text` for human-readable local logs. |
 

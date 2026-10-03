@@ -39,6 +39,7 @@ export default defineRailway(() => {
       S3_REGION: preserve(),
       S3_SECRET_ACCESS_KEY: preserve(),
       JEV_API_KEY: preserve(),
+      AIMAP_DRAFT_API_KEY: preserve(),
       FIREBASE_PROJECT_ID: preserve(),
       AIMAP_ALLOWED_EMAILS: preserve(),
     },

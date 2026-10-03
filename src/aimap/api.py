@@ -190,9 +190,9 @@ def create_app(
         config = app.state.draft_config
         if config is None:
             config = DraftConfig(
-                base_url="https://api.deepseek.com/v1",
+                base_url="https://api.deepseek.com",
                 api_key=None,
-                model="deepseek-chat",
+                model="deepseek-flash",
                 timeout=45.0,
                 max_tokens=700,
             )
