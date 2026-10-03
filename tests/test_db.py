@@ -21,7 +21,8 @@ def test_message_state_keeps_one_row_per_message_and_follows_it(pool):
     with pool.connection() as conn:
         conn.execute("INSERT INTO accounts (address, profile_id) SELECT 'me@x.com', id FROM profiles LIMIT 1")
         mid = conn.execute("""
-            INSERT INTO messages (account_id, rfc822_message_id) SELECT id, '<m1@x>' FROM accounts
+            INSERT INTO messages (account_id, rfc822_message_id, thread_id)
+            SELECT id, '<m1@x>', 'thread:test' FROM accounts
             RETURNING id""").fetchone()[0]
         conn.execute("INSERT INTO message_state (message_id, state, changed_by) VALUES (%s, 'later', 'me@x.com')",
                      (mid,))

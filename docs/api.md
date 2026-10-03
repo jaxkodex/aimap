@@ -11,9 +11,11 @@ and the labels are never changed, and IMAP stays read-only.
 | `GET /accounts` | Each account with its profile, message count and unread count. |
 | `GET /home` | The Home screen: a brief, `act_now`, `waiting` and `sorted` sections. |
 | `GET /messages` | Messages newest first, with their latest labels. |
-| `GET /messages/{id}` | One message: metadata, labels, signals, reasons, mailboxes and state. |
+| `GET /messages/{id}` | One message: metadata, labels, signals, reasons, mailboxes, state and reply info. |
 | `GET /messages/{id}/body` | The text body, read from S3 for that request and not kept. |
+| `GET /messages/{id}/thread` | Messages in the same thread, newest first, with excerpts. |
 | `POST /messages/{id}/actions` | Marks a message handled or later, or undoes it. Returns its new state. |
+| `POST /messages/{id}/draft` | Generates a draft reply by reading the thread and calling a model. |
 
 `/home` takes `account`, `days` (the window, default 7), `new_since` (for
 the brief's `new` count, default 24 hours ago) and `tz`. `act_now` holds the `act_now`
@@ -63,6 +65,98 @@ The state is stored in Postgres with the verified email that set it, and
 `GET /messages/{id}` returns it as `state`: `null`, `"handled"` or `"later"`.
 Nothing is written to IMAP, so archiving, reading or labelling mail in another
 client is unaffected.
+
+## Reply detection
+
+`GET /messages/{id}` includes a `reply` object when the message has been classified:
+
+```json
+{
+  "message_id": 4211,
+  "reply": {"needed": true, "reason": "A person asked you to reschedule."},
+  "...": "other fields unchanged"
+}
+```
+
+The `reply` field is absent when the message has no labels yet. The app treats
+an absent `reply` as a signal to fall back to a local heuristic, so older
+service versions keep working.
+
+Reply detection reads labels already stored and never calls a model. A message
+needs a reply when its `action_bucket` is `"reply"`, or when it is `"act_now"`
+with the `real_person` signal and without bulk list headers. The `reason` is
+the first signal-based reason template, or a fallback string.
+
+## Thread and draft
+
+`GET /messages/{id}/thread` returns messages in the same conversation, newest
+first, with excerpts from their bodies:
+
+```json
+{
+  "message_id": 4211,
+  "thread_id": "9f2c...",
+  "messages": [
+    {
+      "message_id": 4211,
+      "sender": "Barron, Javier",
+      "from_email": "javier.barron@solera.com",
+      "subject": "RE: Jorge - Solera Interview - SW Mgr",
+      "sent_at": "2025-06-02T00:42:00Z",
+      "from_recipient": false,
+      "excerpt": "Jorge, by any chance can you please re schedule..."
+    }
+  ]
+}
+```
+
+The `thread_id` is derived from the References or In-Reply-To headers when
+present, or a hash of the normalized subject and sorted participant addresses.
+The `excerpt` is the first ~240 characters of the body with quoted blocks and
+signatures removed. It is `null` when the body is no longer in the bucket.
+`from_recipient` is true when the account's own address wrote the message.
+
+`POST /messages/{id}/draft` generates a reply by reading the thread and calling
+an OpenAI-compatible chat completions endpoint:
+
+```json
+{"instructions": "Say Tuesday or Wednesday after 15:00 works."}
+```
+
+Returns 200 with:
+
+```json
+{
+  "message_id": 4211,
+  "needs_reply": true,
+  "reply_reason": "A person asked you to reschedule.",
+  "to": ["javier.barron@solera.com"],
+  "cc": [],
+  "subject": "RE: Jorge - Solera Interview - SW Mgr",
+  "body": "Hi Javier,\n\nTuesday or Wednesday after 15:00 both work...",
+  "model": "deepseek-chat",
+  "used_message_ids": [4211, 4188],
+  "created_at": "2025-06-02T07:10:00Z"
+}
+```
+
+The `instructions` field is optional and capped at 2000 characters. The `body`
+is plain text with no quoted original and no subject line inside it. The
+`subject` has the `RE:` prefix added once, never doubled. The `used_message_ids`
+list shows which messages the model actually saw, newest first, capped at 6
+messages or 12000 characters total.
+
+Drafts are not stored. Calling the route twice calls the model twice. Errors:
+
+- 404 when the message is unknown.
+- 422 when `instructions` is too long.
+- 503 when drafting is not configured (no API key or model). Detail:
+  "Drafting is not configured."
+- 502 when the model refused or timed out. The detail says which, in one
+  sentence, with no key material and no raw provider payload.
+
+Configure drafting with the `AIMAP_DRAFT_*` variables. Unset `AIMAP_DRAFT_API_KEY`
+turns the feature off. Both routes still answer, but `/draft` returns 503.
 
 ## Sign-in
 

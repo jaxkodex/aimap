@@ -81,7 +81,7 @@ class Classifier:
         with self.pool.connection() as conn:
             row = conn.execute("""
                 SELECT m.id, a.address, m.rfc822_message_id, m.from_email, m.from_name, m.subject, m.sent_at,
-                       m.in_reply_to, m.has_list_headers, p.id, p.profile,
+                       m.in_reply_to, m.message_references, m.has_list_headers, p.id, p.profile,
                        (SELECT l.s3_key FROM message_locations l WHERE l.message_id = m.id
                         ORDER BY l.ingested_at DESC, l.id DESC LIMIT 1)
                 FROM messages m
@@ -90,12 +90,12 @@ class Classifier:
                 WHERE m.id = %s""", (message_id,)).fetchone()
             if row is None:
                 return None
-            pats = profiles.patterns(conn, row[9])
+            pats = profiles.patterns(conn, row[10])
         return {
             "message_id": row[0], "account": row[1],
             "meta": MessageMeta(rfc822_message_id=row[2], from_email=row[3], from_name=row[4], subject=row[5],
-                                sent_at=row[6], in_reply_to=row[7], has_list_headers=row[8]),
-            "profile_id": row[9], "profile": row[10], "patterns": pats, "s3_key": row[11],
+                                sent_at=row[6], in_reply_to=row[7], references=row[8], has_list_headers=row[9]),
+            "profile_id": row[10], "profile": row[11], "patterns": pats, "s3_key": row[12],
         }
 
     def _exists(self, message_id: int, key: str) -> bool:

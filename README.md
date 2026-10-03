@@ -3,7 +3,9 @@
 Watches one or more IMAP mailboxes, copies every new message byte for byte
 into an S3 bucket, and classifies it with [TypeSafe Jev](https://typesafe.ai):
 importance, a suggested action and tags. Message metadata and labels go to
-Postgres. Bodies stay in S3 only.
+Postgres. Bodies stay in S3 only. The HTTP API also generates draft replies
+for messages that need an answer, reading the thread and calling an
+OpenAI-compatible model.
 
 It is one Docker image with three processes:
 
@@ -65,6 +67,8 @@ Running it:
 - [x] Profiles and pattern catalogues in Postgres, one profile per account
 - [x] HTTP API for the app, behind Firebase Authentication. It reads the
       mailbox only; the one write is aimap's own Handled / Later state
+- [x] Thread grouping and draft reply generation by reading the thread and
+      calling an OpenAI-compatible chat completions endpoint
 - [ ] Embeddings: an `embed` job stage that reads the `.eml` from S3 and writes
       to a pgvector table (Railway needs its pgvector Postgres image for this)
 - [ ] Re-run `decide` over stored Jev answers after a threshold change, with

@@ -21,7 +21,7 @@ Mailbox names are URL-encoded, so `[Gmail]/All Mail` becomes `%5BGmail%5D%2FAll%
 | `profiles` | Recipient context Jev classifies against. `default` exists from the start. |
 | `accounts` | Address from the accounts file, with its profile. No credentials. |
 | `mailbox_state` | Account and mailbox: `uidvalidity`, `last_uid`. |
-| `messages` | Account and RFC 822 Message-ID: sender, subject, date, reply and list headers. A message without a Message-ID uses `sha256:<hash of the raw bytes>`. |
+| `messages` | Account and RFC 822 Message-ID: sender, subject, date, reply headers (In-Reply-To, References), thread_id, and list headers. A message without a Message-ID uses `sha256:<hash of the raw bytes>`. |
 | `message_locations` | Mailbox, UIDVALIDITY and UID where a message is stored, with its S3 key and IMAP flags. The same message in `INBOX` and `[Gmail]/All Mail` has two locations and one `messages` row, so it is classified once. |
 | `jobs` | Message and stage. The only stage today is `classify`. |
 | `patterns` | Known pattern of a profile: insight, importance, action bucket, tags, example senders and subjects. |
@@ -29,6 +29,12 @@ Mailbox names are URL-encoded, so `[Gmail]/All Mail` becomes `%5BGmail%5D%2FAll%
 | `message_state` | Message you marked `handled` or `later` in the app, with when and which verified email did it. Undo deletes the row, so no row means normal. Nothing here is sent to IMAP. |
 
 The `message_labels` view joins each message with its latest classification.
+
+The `thread_id` column groups messages into conversations. It is the root of the
+References or In-Reply-To chain when present (the leftmost message-id), or a
+hash of the normalized subject (stripping RE:/FW:/FWD: and localized variants,
+collapsing whitespace, casefolding) plus the sorted participant addresses when
+no reply chain exists. An index on `thread_id` makes thread lookups fast.
 
 `aimap migrate` applies the numbered SQL files in
 [`src/aimap/migrations`](../src/aimap/migrations) that are missing, each in its

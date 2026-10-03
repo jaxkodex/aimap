@@ -27,6 +27,7 @@ class MessageMeta:
     subject: str | None
     sent_at: datetime | None
     in_reply_to: str | None
+    references: str | None
     has_list_headers: bool
 
 
@@ -49,6 +50,47 @@ def fallback_message_id(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def normalize_subject(subject: str | None) -> str:
+    """Strip RE:/FW:/FWD: and their localized variants, collapse whitespace, casefold."""
+    if not subject:
+        return ""
+    s = subject
+    while True:
+        prev = s
+        s = _REPLY_PREFIX.sub("", s)
+        if s == prev:
+            break
+    s = re.sub(r"\s+", " ", s).strip().casefold()
+    return s
+
+
+def derive_thread_id(references: str | None, in_reply_to: str | None, subject: str | None,
+                     participants: list[str], rfc822_message_id: str | None = None) -> str:
+    """Derive a thread identifier from References chain root or the message's own ID.
+
+    If References or In-Reply-To exist, the root message-id (leftmost in References or In-Reply-To)
+    is the thread_id. Otherwise, use the message's own rfc822_message_id if it looks like a message-id,
+    or hash the normalized subject with sorted participant addresses.
+    participants is [from_email, to_email, cc_email, ...] or any list of addresses involved.
+    """
+    if references:
+        parts = re.split(r"[,\s]+", references.strip())
+        message_ids = [p.strip() for p in parts if p.strip().startswith("<") and p.strip().endswith(">")]
+        if message_ids:
+            return message_ids[0]
+
+    if in_reply_to and in_reply_to.startswith("<") and in_reply_to.endswith(">"):
+        return in_reply_to
+
+    if rfc822_message_id and rfc822_message_id.startswith("<") and rfc822_message_id.endswith(">"):
+        return rfc822_message_id
+
+    norm_subject = normalize_subject(subject)
+    sorted_participants = sorted(p.lower() for p in participants if p)
+    text = norm_subject + "|" + "|".join(sorted_participants)
+    return "thread:" + hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
 def parse_meta(raw: bytes) -> MessageMeta:
     msg = _message(raw)
     from_name, from_email = email.utils.parseaddr(_header(msg, "From") or "")
@@ -68,6 +110,7 @@ def parse_meta(raw: bytes) -> MessageMeta:
         subject=_header(msg, "Subject"),
         sent_at=sent_at,
         in_reply_to=_header(msg, "In-Reply-To"),
+        references=_header(msg, "References"),
         has_list_headers=bool(_header(msg, "List-Unsubscribe") or _header(msg, "List-Id")
                               or precedence in {"bulk", "list"}),
     )
@@ -120,6 +163,7 @@ class _TextExtractor(HTMLParser):
 
 _URL = re.compile(r"https?://\S+|www\.\S+")
 _INVISIBLE = re.compile(r"[\u200b-\u200f\u2060\u00ad\u034f\ufeff\u00a0]+")
+_REPLY_PREFIX = re.compile(r"^\s*(re|fw|fwd|aw|r|tr|sv|enc|rif|res|wg|antw|vs|ynt)\s*:\s*", re.IGNORECASE)
 
 
 def clean_text(text: str) -> str:
@@ -153,3 +197,38 @@ def body_text(raw: bytes, max_chars: int = 1500) -> str:
     if len(text) > max_chars:
         text = text[:max_chars].rsplit(" ", 1)[0] + " [...]"
     return text
+
+
+def strip_quoted(text: str) -> str:
+    """Remove quoted replies and signatures from a message body.
+
+    Handles leading '>' blocks, 'On <date> <person> wrote:', '-----Original Message-----',
+    '-----Original Appointment-----', and '-- ' signature cuts.
+    """
+    lines = text.splitlines()
+    result = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Stop at signature marker (-- followed by space or newline)
+        if line.rstrip() == "--" or line.rstrip() == "-- ":
+            break
+
+        # Stop at common reply/forward markers
+        if stripped.startswith("-----Original Message-----"):
+            break
+        if stripped.startswith("-----Original Appointment-----"):
+            break
+
+        # 'On <date> ... wrote:' pattern (common in Gmail, Outlook replies)
+        if re.match(r"^On\s+.+\s+wrote:\s*$", stripped, re.IGNORECASE):
+            break
+
+        # Skip lines starting with > (quoted text)
+        if line.lstrip().startswith(">"):
+            continue
+
+        result.append(line)
+
+    return "\n".join(result).strip()
