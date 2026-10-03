@@ -103,6 +103,8 @@ def generate_draft(
     if not config.is_configured():
         raise DraftingNotConfigured("Drafting is not configured.")
 
+    log.info("draft requested", extra={"instructions_chars": len(instructions) if instructions else 0})
+
     if instructions and len(instructions) > 2000:
         raise InstructionsTooLong("instructions too long")
 
