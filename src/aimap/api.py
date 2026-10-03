@@ -20,8 +20,9 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
-from aimap import __version__, home, inbox
+from aimap import __version__, draft, home, inbox
 from aimap.auth import AuthError, Forbidden, User, Verifier
+from aimap.draft import DraftConfig
 from aimap.parse import body_text
 from aimap.storage import Store
 
@@ -52,10 +53,17 @@ class Action(BaseModel):
     action: Literal["handled", "later", "undo"]
 
 
-def create_app(pool: ConnectionPool, store: Store, verifier: Verifier) -> FastAPI:
+class DraftRequest(BaseModel):
+    instructions: str | None = None
+
+
+def create_app(
+    pool: ConnectionPool, store: Store, verifier: Verifier, draft_config: DraftConfig | None = None
+) -> FastAPI:
     app = FastAPI(title="aimap", version=__version__, docs_url=None, redoc_url=None)
 
     app.state.verifier = verifier
+    app.state.draft_config = draft_config
 
     @app.exception_handler(inbox.CursorError)
     def bad_cursor(_request: Request, e: inbox.CursorError) -> JSONResponse:
@@ -146,6 +154,30 @@ def create_app(pool: ConnectionPool, store: Store, verifier: Verifier) -> FastAP
         if got is None:
             raise HTTPException(404, "message body is not in the bucket")
         return {"message_id": message_id, "text": body_text(got[0], BODY_CHARS)}
+
+    @app.get("/messages/{message_id}/thread")
+    def message_thread(_user: Authed, message_id: int) -> dict:
+        """The thread this message belongs to, newest first, with excerpts from S3."""
+        with pool.connection() as conn:
+            thread = inbox.get_thread(conn, message_id, store)
+        if thread is None:
+            raise HTTPException(404, "no such message")
+        return thread
+
+    @app.post("/messages/{message_id}/draft")
+    def create_draft(_user: Authed, message_id: int, body: DraftRequest) -> dict:
+        """Generate a draft reply for the message, reading the thread and calling the model."""
+        config = app.state.draft_config
+        if config is None:
+            config = DraftConfig(
+                base_url="https://api.deepseek.com/v1",
+                api_key=None,
+                model="deepseek-chat",
+                timeout=45.0,
+                max_tokens=700,
+            )
+        with pool.connection() as conn:
+            return draft.generate_draft(conn, store, message_id, body.instructions, config)
 
     return app
 

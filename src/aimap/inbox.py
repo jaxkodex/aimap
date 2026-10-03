@@ -14,11 +14,16 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from psycopg import Connection
 
 from aimap.home import Item
+from aimap.home import reasons as generate_reasons
+from aimap.parse import body_text, strip_quoted
+
+if TYPE_CHECKING:
+    from aimap.storage import Store
 
 _LATEST = """
     LEFT JOIN LATERAL (
@@ -41,6 +46,31 @@ FILTERS = {
 
 class CursorError(ValueError):
     pass
+
+
+def needs_reply(action_bucket: str | None, signals: dict[str, Any], bulk: bool) -> dict[str, Any] | None:
+    """Decide if a message needs a reply based on labels already stored.
+    
+    Returns {"needed": bool, "reason": str | None} when labels exist, or None if not yet classified.
+    Reply needed when: action_bucket is 'reply', or 'act_now' with real_person signal and not bulk.
+    """
+    if action_bucket is None:
+        return None  # not classified yet
+    
+    if action_bucket == "reply":
+        # Generate the reason from signals
+        signal_reasons = generate_reasons(signals)
+        reason = signal_reasons[0] if signal_reasons else "Someone expects a reply."
+        return {"needed": True, "reason": reason}
+    
+    if action_bucket == "act_now":
+        has_real_person = signals.get("real_person", 0) > 0
+        if has_real_person and not bulk:
+            signal_reasons = generate_reasons(signals)
+            reason = signal_reasons[0] if signal_reasons else "A person wrote to you."
+            return {"needed": True, "reason": reason}
+    
+    return {"needed": False, "reason": None}
 
 
 def encode_cursor(at: datetime, message_id: int) -> str:
@@ -159,6 +189,9 @@ def get_message(conn: Connection, message_id: int) -> dict[str, Any] | None:
     locations = conn.execute("""
         SELECT mailbox, flags, s3_key FROM message_locations WHERE message_id = %s
         ORDER BY ingested_at DESC, id DESC""", (message_id,)).fetchall()
+    
+    reply = needs_reply(r[12], r[17] or {}, r[8]) if r[12] is not None else None
+    
     return {
         "message_id": r[0], "account": r[1], "profile": r[20], "rfc822_message_id": r[2], "from_email": r[3],
         "sender": r[4] or r[3] or "(unknown)", "subject": r[5], "sent_at": r[6], "in_reply_to": r[7],
@@ -167,6 +200,7 @@ def get_message(conn: Connection, message_id: int) -> dict[str, Any] | None:
             "importance": r[11], "action_bucket": r[12], "tags": r[13] or [], "insight": r[14],
             "needs_review": r[15], "priority": r[16], "signals": r[17] or {}, "classified_at": r[18],
         },
+        "reply": reply,
         "mailboxes": [{"mailbox": mb, "flags": flags} for mb, flags, _ in locations],
         "s3_key": locations[0][2] if locations else None,
     }
@@ -181,3 +215,54 @@ def accounts(conn: Connection) -> list[dict[str, Any]]:
         GROUP BY a.id, a.address, p.name
         ORDER BY a.address""").fetchall()
     return [{"address": r[0], "profile": r[1], "messages": r[2], "unread": r[3]} for r in rows]
+
+
+def get_thread(conn: Connection, message_id: int, store: Store) -> dict[str, Any] | None:
+    """The messages in the same thread, newest first, with excerpts from S3."""
+    # First check if the message exists and get its thread_id
+    row = conn.execute("SELECT thread_id FROM messages WHERE id = %s", (message_id,)).fetchone()
+    if row is None:
+        return None
+    thread_id = row[0]
+    
+    # Get all messages in the thread, newest first
+    rows = conn.execute("""
+        SELECT m.id, m.from_name, m.from_email, m.subject, m.sent_at,
+               (SELECT s3_key FROM message_locations WHERE message_id = m.id ORDER BY ingested_at DESC LIMIT 1),
+               a.address
+        FROM messages m
+        JOIN accounts a ON a.id = m.account_id
+        WHERE m.thread_id = %s
+        ORDER BY coalesce(m.sent_at, m.created_at) DESC, m.id DESC""", (thread_id,)).fetchall()
+    
+    messages = []
+    for r in rows:
+        msg_id, from_name, from_email, subject, sent_at, s3_key, account = r
+        
+        # Read body from S3 and create excerpt
+        excerpt = None
+        if s3_key:
+            got = store.get_raw(s3_key)
+            if got:
+                full_text = body_text(got[0], max_chars=50_000)
+                stripped = strip_quoted(full_text)
+                excerpt = stripped[:240].rsplit(" ", 1)[0] + "…" if len(stripped) > 240 else stripped
+        
+        # Check if this message is from the recipient (account address)
+        from_recipient = from_email and from_email.lower() == account.lower()
+        
+        messages.append({
+            "message_id": msg_id,
+            "sender": from_name or from_email or "(unknown)",
+            "from_email": from_email,
+            "subject": subject,
+            "sent_at": sent_at,
+            "from_recipient": from_recipient,
+            "excerpt": excerpt,
+        })
+    
+    return {
+        "message_id": message_id,
+        "thread_id": thread_id,
+        "messages": messages,
+    }

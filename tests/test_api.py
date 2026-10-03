@@ -219,3 +219,46 @@ def test_body_missing_from_bucket_is_404(client, seeded, store, s3):
 def test_accounts(client, seeded):
     assert client.get("/accounts", headers=AUTH).json() == {
         "accounts": [{"address": ME, "profile": "default", "messages": 4, "unread": 3}]}
+
+
+def test_reply_detection_on_act_now_with_real_person(client, seeded):
+    mid = seeded["Sign-off needed"]
+    m = client.get(f"/messages/{mid}", headers=AUTH).json()
+    assert m["reply"] == {"needed": True, "reason": "Mentions a deadline"}
+
+
+def test_reply_detection_on_reply_bucket(client, seeded):
+    mid = seeded["Offer letter"]
+    m = client.get(f"/messages/{mid}", headers=AUTH).json()
+    assert m["reply"]["needed"] is True
+
+
+def test_reply_detection_on_newsletter(client, seeded):
+    mid = seeded["Weekly digest"]
+    m = client.get(f"/messages/{mid}", headers=AUTH).json()
+    assert m["reply"] == {"needed": False, "reason": None}
+
+
+def test_reply_absent_when_not_classified(client, seeded):
+    mid = seeded["PR notes"]
+    m = client.get(f"/messages/{mid}", headers=AUTH).json()
+    assert "reply" not in m or m["reply"] is None
+
+
+def test_thread_endpoint(client, seeded, pool):
+    mid = seeded["Sign-off needed"]
+    resp = client.get(f"/messages/{mid}/thread", headers=AUTH)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["message_id"] == mid
+    assert "thread_id" in data
+    assert len(data["messages"]) >= 1
+    msg = data["messages"][0]
+    assert msg["message_id"] == mid
+    assert msg["sender"] == "Priya"
+    assert msg["from_recipient"] is False
+    assert "excerpt" in msg
+
+
+def test_thread_endpoint_404(client):
+    assert client.get("/messages/999999/thread", headers=AUTH).status_code == 404

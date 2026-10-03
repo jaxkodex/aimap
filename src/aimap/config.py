@@ -39,12 +39,22 @@ class ClassifierSettings:
 
 
 @dataclass(frozen=True)
+class DraftSettings:
+    base_url: str = "https://api.deepseek.com/v1"
+    api_key: str | None = field(default=None, repr=False)
+    model: str = "deepseek-chat"
+    timeout: float = 45.0
+    max_tokens: int = 700
+
+
+@dataclass(frozen=True)
 class ApiSettings:
     firebase_project_id: str | None = None
     allowed_emails: frozenset[str] = frozenset()  # Firebase lets any Google account sign in; this is the gate
     host: str = "0.0.0.0"
     port: int = 8080
     pool_size: int = 10
+    draft: DraftSettings = field(default_factory=DraftSettings)
 
 
 @dataclass(frozen=True)
@@ -154,6 +164,13 @@ def load_settings(env: Mapping[str, str] | None = None, *, need_accounts: bool =
             host=env.get("API_HOST", "").strip() or "0.0.0.0",
             port=_int(env, "PORT", 8080),
             pool_size=_int(env, "API_POOL_SIZE", 10),
+            draft=DraftSettings(
+                base_url=env.get("AIMAP_DRAFT_BASE_URL", "").strip() or "https://api.deepseek.com/v1",
+                api_key=env.get("AIMAP_DRAFT_API_KEY", "").strip() or None,
+                model=env.get("AIMAP_DRAFT_MODEL", "").strip() or "deepseek-chat",
+                timeout=_float(env, "AIMAP_DRAFT_TIMEOUT", 45.0),
+                max_tokens=_int(env, "AIMAP_DRAFT_MAX_TOKENS", 700),
+            ),
         ),
     )
     if settings.poll_interval <= 0:

@@ -273,6 +273,7 @@ def service_command(command: str, args: argparse.Namespace, settings: Settings, 
 def serve_api(settings: Settings, pool, store: Store) -> int:
     from aimap.api import create_app, serve
     from aimap.auth import FirebaseVerifier
+    from aimap.draft import DraftConfig
 
     a = settings.api
     if not a.firebase_project_id:
@@ -281,7 +282,14 @@ def serve_api(settings: Settings, pool, store: Store) -> int:
     if not a.allowed_emails:
         log.error("AIMAP_ALLOWED_EMAILS is required for api: nobody could sign in")
         return 2
-    app = create_app(pool, store, FirebaseVerifier(a.firebase_project_id, a.allowed_emails))
+    draft_config = DraftConfig(
+        base_url=a.draft.base_url,
+        api_key=a.draft.api_key,
+        model=a.draft.model,
+        timeout=a.draft.timeout,
+        max_tokens=a.draft.max_tokens,
+    )
+    app = create_app(pool, store, FirebaseVerifier(a.firebase_project_id, a.allowed_emails), draft_config)
     log.info("api starting", extra={"port": a.port, "allowed_emails": len(a.allowed_emails)})
     serve(app, a.host, a.port, settings.log_level)
     return 0
