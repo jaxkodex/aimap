@@ -1,7 +1,7 @@
 """aimap: copy IMAP mail to S3, record it in Postgres and classify it with Jev.
 
 Worker (ingestion):
-    aimap run                  poll forever (container default)
+    aimap run                  poll forever
     aimap once                 one pass over every account, exit 1 if any failed
     aimap check                verify S3, Postgres and log in to every account
 
@@ -13,6 +13,9 @@ Classifier:
 
 API (for the app; Firebase ID token required):
     aimap api                  serve HTTP on $PORT
+
+All in one container:
+    aimap all                  run, classify and api as child processes (container default)
 
 Database:
     aimap migrate              apply missing schema migrations
@@ -65,6 +68,7 @@ from aimap.config import ConfigError, Settings, load_dotenv, load_settings
 from aimap.crypto import Cipher, CryptoError, generate_key
 from aimap.imap import ImapSource
 from aimap.storage import ConflictError, Store
+from aimap.supervise import Supervisor, aimap_commands
 from aimap.worker import Worker
 
 log = logging.getLogger("aimap")
@@ -82,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("migrate", help="apply missing database migrations")
     sub.add_parser("backfill", help="record messages already in S3 and queue them for classification")
     sub.add_parser("api", help="serve the HTTP API for the app")
+    sub.add_parser("all", help="run the worker, the classifier and the API as child processes")
     cls = sub.add_parser("classify", help="classify queued messages with Jev")
     cls.add_argument("--once", action="store_true", help="process every due job, then exit")
 
@@ -161,6 +166,13 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     load_dotenv(Path(args.env_file))
+    if command == "all":
+        logs.setup(os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+                   os.environ.get("LOG_FORMAT", "json").strip().lower() or "json")
+        sup = Supervisor(aimap_commands(args.env_file))
+        sup.install_signal_handlers()
+        sys.exit(sup.run())
+
     set_profile = command == "accounts" and args.action == "set-profile"
     try:
         settings = load_settings(need_accounts=command not in DB_COMMANDS and not set_profile)

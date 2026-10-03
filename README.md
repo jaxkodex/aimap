@@ -5,7 +5,7 @@ into an S3 bucket, and classifies it with [TypeSafe Jev](https://typesafe.ai):
 importance, a suggested action and tags. Message metadata and labels go to
 Postgres. Bodies stay in S3 only.
 
-It is one Docker image run as three processes:
+It is one Docker image with three processes:
 
 - `aimap run` polls IMAP, writes `.eml` files to S3, records their headers in
   Postgres and queues a `classify` job for each new message.
@@ -15,7 +15,8 @@ It is one Docker image run as three processes:
   in with Firebase Authentication.
 
 They share nothing but the bucket and the database, so a Jev outage never
-stops ingestion, and each process scales and restarts on its own.
+stops ingestion. `aimap all`, the image's default, runs the three as child
+processes of one container, and stops the container if any of them exits.
 
 Accounts live in an encrypted file in the same bucket. You add or change
 them with `aimap accounts ...`, and the running worker picks the change up on
@@ -29,7 +30,7 @@ cp .env.example .env                           # S3, DATABASE_URL, JEV_API_KEY
 echo "AIMAP_SECRET_KEY=$(uv run aimap keygen)" >> .env
 uv run aimap migrate
 uv run aimap accounts add me@gmail.com --host imap.gmail.com
-uv run aimap run                               # then `aimap classify` and `aimap api` in other terminals
+uv run aimap all                               # or `aimap run`, `aimap classify` and `aimap api` separately
 ```
 
 [Run locally](docs/running-locally.md) also covers Docker Compose without AWS.
