@@ -31,7 +31,8 @@ def seeded(store, pg_catalog, pool):
     """Four messages from the last day: act_now, reply, skim (read), and one not classified yet."""
     now = datetime.now(UTC).replace(microsecond=0)
     specs = [
-        (1, "Priya <priya@legal.example>", "Sign-off needed", "act_now", 9.0, {"time_sensitive": 0.9}),
+        (1, "Priya <priya@legal.example>", "Sign-off needed", "act_now", 9.0,
+         {"time_sensitive": 0.9, "real_person": 0.8}),
         (2, "Elena <elena@example.com>", "Offer letter", "reply", 4.0, {"real_person": 0.95}),
         (3, "News <news@list.example>", "Weekly digest", "skim", -1.0, {"promotional": 0.2}),
         (4, "Sam <sam@example.com>", "PR notes", None, 0, {}),
@@ -88,7 +89,7 @@ def test_me(client):
 def test_home(client, seeded):
     body = client.get("/home", headers=AUTH).json()
     assert [c["subject"] for c in body["act_now"]] == ["Sign-off needed"]
-    assert body["act_now"][0]["reasons"] == ["Mentions a deadline"]
+    assert body["act_now"][0]["reasons"] == ["Mentions a deadline", "Written to you by a person"]
     assert [c["subject"] for c in body["waiting"]] == ["Offer letter"]
     assert body["sorted"] == [{"name": "newsletter", "count": 1, "unread": 0, "latest_at": body["sorted"][0]
                                ["latest_at"], "summary": "News"}]
@@ -203,7 +204,7 @@ def test_message_detail_and_body(client, seeded):
     m = client.get(f"/messages/{mid}", headers=AUTH).json()
     assert m["sender"] == "Priya" and m["labels"]["action_bucket"] == "act_now"
     assert m["account"] == ME and m["profile"] == "default"  # the same profile name Home cards carry
-    assert m["labels"]["reasons"] == ["Mentions a deadline"]
+    assert m["labels"]["reasons"] == ["Mentions a deadline", "Written to you by a person"]
     assert m["mailboxes"] == [{"mailbox": "INBOX", "flags": []}] and "s3_key" not in m
     assert client.get(f"/messages/{mid}/body", headers=AUTH).json()["text"] == "Body of message 1."
     assert client.get("/messages/999999", headers=AUTH).status_code == 404
@@ -262,3 +263,62 @@ def test_thread_endpoint(client, seeded, pool):
 
 def test_thread_endpoint_404(client):
     assert client.get("/messages/999999/thread", headers=AUTH).status_code == 404
+
+
+def test_thread_groups_messages_by_references_and_strips_quoted_text(store, pg_catalog, pool, client):
+    """Thread endpoint returns all messages in a conversation, newest first, with excerpts stripped of quotes."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    original_body = "Jorge, can you please schedule the Solera interview for next week? Thanks, Javier"
+    reply_body = (
+        "Jorge, by any chance can you please re schedule for Tuesday or Wednesday after 3pm?\r\n\r\n"
+        "-----Original Appointment-----\r\n"
+        "From: Jorge Vilca <jorge.vilca@example.com>\r\n"
+        "Sent: Monday, June 1, 2025 5:30 PM\r\n"
+        "To: Barron, Javier <javier.barron@solera.com>\r\n"
+        "Subject: Jorge - Solera Interview - SW Mgr\r\n\r\n"
+        "Jorge, can you please schedule the Solera interview for next week? Thanks, Javier"
+    )
+    original = email_bytes(
+        1,
+        message_id="<original@example.com>",
+        sender="Javier Barron <javier.barron@solera.com>",
+        subject="Jorge - Solera Interview - SW Mgr",
+        body=original_body,
+        extra=f"Date: {_date(now - timedelta(days=1))}\r\n",
+    )
+    reply = email_bytes(
+        2,
+        message_id="<reply@example.com>",
+        sender="Javier Barron <javier.barron@solera.com>",
+        subject="RE: Jorge - Solera Interview - SW Mgr",
+        body=reply_body,
+        extra=(
+            f"Date: {_date(now)}\r\n"
+            "In-Reply-To: <original@example.com>\r\n"
+            "References: <original@example.com>\r\n"
+        ),
+    )
+    sync_mailbox(FakeMailbox({"INBOX": (1, {1: original, 2: reply})}), store, pg_catalog, ME, "INBOX",
+                 initial_fetch_count=0)
+
+    with pool.connection() as conn:
+        reply_id = conn.execute(
+            "SELECT id FROM messages WHERE rfc822_message_id = '<reply@example.com>'"
+        ).fetchone()[0]
+
+    resp = client.get(f"/messages/{reply_id}/thread", headers=AUTH)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["message_id"] == reply_id
+    assert len(data["messages"]) == 2
+
+    newest = data["messages"][0]
+    oldest = data["messages"][1]
+    assert newest["subject"] == "RE: Jorge - Solera Interview - SW Mgr"
+    assert oldest["subject"] == "Jorge - Solera Interview - SW Mgr"
+    assert newest["sender"] == "Javier Barron"
+    assert oldest["sender"] == "Javier Barron"
+
+    assert "-----Original Appointment-----" not in newest["excerpt"]
+    assert "re schedule" in newest["excerpt"]
+    assert "schedule the Solera interview" in oldest["excerpt"]

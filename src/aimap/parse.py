@@ -65,25 +65,26 @@ def normalize_subject(subject: str | None) -> str:
 
 
 def derive_thread_id(references: str | None, in_reply_to: str | None, subject: str | None,
-                     participants: list[str]) -> str:
-    """Derive a thread identifier from References chain root or a hash of subject + participants.
-    
+                     participants: list[str], rfc822_message_id: str | None = None) -> str:
+    """Derive a thread identifier from References chain root or the message's own ID.
+
     If References or In-Reply-To exist, the root message-id (leftmost in References or In-Reply-To)
-    is the thread_id. Otherwise, hash the normalized subject with sorted participant addresses.
+    is the thread_id. Otherwise, use the message's own rfc822_message_id if it looks like a message-id,
+    or hash the normalized subject with sorted participant addresses.
     participants is [from_email, to_email, cc_email, ...] or any list of addresses involved.
     """
-    # Try References header first (space or comma separated list of message-ids)
     if references:
         parts = re.split(r"[,\s]+", references.strip())
         message_ids = [p.strip() for p in parts if p.strip().startswith("<") and p.strip().endswith(">")]
         if message_ids:
-            return message_ids[0]  # leftmost is the root
-    
-    # Fall back to In-Reply-To
+            return message_ids[0]
+
     if in_reply_to and in_reply_to.startswith("<") and in_reply_to.endswith(">"):
         return in_reply_to
-    
-    # No reply chain: hash subject + sorted participants
+
+    if rfc822_message_id and rfc822_message_id.startswith("<") and rfc822_message_id.endswith(">"):
+        return rfc822_message_id
+
     norm_subject = normalize_subject(subject)
     sorted_participants = sorted(p.lower() for p in participants if p)
     text = norm_subject + "|" + "|".join(sorted_participants)
@@ -200,34 +201,34 @@ def body_text(raw: bytes, max_chars: int = 1500) -> str:
 
 def strip_quoted(text: str) -> str:
     """Remove quoted replies and signatures from a message body.
-    
+
     Handles leading '>' blocks, 'On <date> <person> wrote:', '-----Original Message-----',
     '-----Original Appointment-----', and '-- ' signature cuts.
     """
     lines = text.splitlines()
     result = []
-    
+
     for line in lines:
         stripped = line.strip()
-        
+
         # Stop at signature marker (-- followed by space or newline)
         if line.rstrip() == "--" or line.rstrip() == "-- ":
             break
-        
+
         # Stop at common reply/forward markers
         if stripped.startswith("-----Original Message-----"):
             break
         if stripped.startswith("-----Original Appointment-----"):
             break
-        
+
         # 'On <date> ... wrote:' pattern (common in Gmail, Outlook replies)
         if re.match(r"^On\s+.+\s+wrote:\s*$", stripped, re.IGNORECASE):
             break
-        
+
         # Skip lines starting with > (quoted text)
         if line.lstrip().startswith(">"):
             continue
-        
+
         result.append(line)
-    
+
     return "\n".join(result).strip()

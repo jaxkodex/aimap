@@ -106,12 +106,12 @@ class PgCatalog:
         # Get the account address for thread_id derivation
         account_addr = conn.execute("SELECT address FROM accounts WHERE id = %s", (account_id,)).fetchone()[0]
         participants = [account_addr, m.from_email] if m.from_email else [account_addr]
-        thread_id = derive_thread_id(m.references, m.in_reply_to, m.subject, participants)
-        
+        thread_id = derive_thread_id(m.references, m.in_reply_to, m.subject, participants, m.rfc822_message_id)
+
         # xmax = 0 means the row was inserted, not updated: a message we had not seen.
         message_id, inserted = conn.execute("""
             INSERT INTO messages (account_id, rfc822_message_id, from_email, from_name, subject, sent_at,
-                                  in_reply_to, references, thread_id, has_list_headers)
+                                  in_reply_to, message_references, thread_id, has_list_headers)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_id, rfc822_message_id) DO UPDATE SET account_id = EXCLUDED.account_id
             RETURNING id, (xmax = 0)""",

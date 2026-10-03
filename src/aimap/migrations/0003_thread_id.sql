@@ -2,7 +2,7 @@
 -- of the References/In-Reply-To chain when present, else a hash of the normalized
 -- subject (stripping RE:/FW: etc.) plus sorted participant addresses.
 
-ALTER TABLE messages ADD COLUMN references TEXT;
+ALTER TABLE messages ADD COLUMN message_references TEXT;
 ALTER TABLE messages ADD COLUMN thread_id TEXT;
 
 -- Backfill thread_id for existing rows. Derivation: use the leftmost message-id from
@@ -27,27 +27,35 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
-UPDATE messages SET thread_id = CASE
-    -- References header: split on commas and whitespace, take leftmost <message-id>
-    WHEN references IS NOT NULL AND references ~ '<[^>]+>' THEN
-        (SELECT (regexp_matches(references, '<[^>]+>', 'g'))[1] LIMIT 1)
-    -- In-Reply-To: use it if it looks like a message-id
-    WHEN in_reply_to IS NOT NULL AND in_reply_to ~ '^<.*>$' THEN
-        in_reply_to
-    -- No reply chain: hash normalized subject + sorted participants (account address, from_email)
-    ELSE
-        'thread:' || substring(encode(digest(
-            _normalize_subject(subject) || '|' ||
-            array_to_string(array_agg(lower(p) ORDER BY p) FILTER (WHERE p IS NOT NULL), '|', ''),
-            'sha256'
-        ), 'hex'), 1, 16)
-END
+-- Build a thread_id from message_references, in_reply_to, subject, and participants.
+-- Returns the leftmost message-id from the chain, or a hash when no chain exists.
+UPDATE messages SET thread_id = t.computed_thread_id
 FROM (
-    SELECT m2.id, a.address AS account_addr, m2.from_email
-    FROM messages m2
-    JOIN accounts a ON a.id = m2.account_id
-) parts
-WHERE messages.id = parts.id;
+    SELECT m.id,
+        CASE
+            WHEN m.message_references IS NOT NULL AND m.message_references ~ '<[^>]+>' THEN
+                (regexp_match(m.message_references, '<[^>]+>'))[1]
+            WHEN m.in_reply_to IS NOT NULL AND m.in_reply_to ~ '^<.*>$' THEN
+                m.in_reply_to
+            WHEN m.rfc822_message_id IS NOT NULL AND m.rfc822_message_id ~ '^<.*>$' THEN
+                m.rfc822_message_id
+            ELSE
+                'thread:' || substring(md5(
+                    coalesce(_normalize_subject(m.subject), '') || '|' ||
+                    coalesce(string_agg(lower(p.addr), '|' ORDER BY p.addr), '')
+                ), 1, 16)
+        END AS computed_thread_id
+    FROM messages m
+    JOIN accounts a ON a.id = m.account_id
+    CROSS JOIN LATERAL (
+        SELECT addr FROM (
+            VALUES (a.address), (m.from_email)
+        ) AS v(addr)
+        WHERE addr IS NOT NULL
+    ) p
+    GROUP BY m.id, m.message_references, m.in_reply_to, m.rfc822_message_id, m.subject, a.address
+) t
+WHERE messages.id = t.id;
 
 DROP FUNCTION _normalize_subject;
 

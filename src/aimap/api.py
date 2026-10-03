@@ -69,6 +69,26 @@ def create_app(
     def bad_cursor(_request: Request, e: inbox.CursorError) -> JSONResponse:
         return JSONResponse({"detail": str(e)}, status_code=400)
 
+    @app.exception_handler(draft.MessageNotFound)
+    def draft_not_found(_request: Request, e: draft.MessageNotFound) -> JSONResponse:
+        return JSONResponse({"detail": str(e)}, status_code=404)
+
+    @app.exception_handler(draft.InstructionsTooLong)
+    def draft_instructions_too_long(_request: Request, e: draft.InstructionsTooLong) -> JSONResponse:
+        return JSONResponse({"detail": str(e)}, status_code=422)
+
+    @app.exception_handler(draft.DraftingNotConfigured)
+    def draft_not_configured(_request: Request, e: draft.DraftingNotConfigured) -> JSONResponse:
+        return JSONResponse({"detail": str(e)}, status_code=503)
+
+    @app.exception_handler(draft.ModelTimeout)
+    def draft_model_timeout(_request: Request, e: draft.ModelTimeout) -> JSONResponse:
+        return JSONResponse({"detail": str(e)}, status_code=502)
+
+    @app.exception_handler(draft.ModelRequestFailed)
+    def draft_model_failed(_request: Request, e: draft.ModelRequestFailed) -> JSONResponse:
+        return JSONResponse({"detail": str(e)}, status_code=502)
+
     @app.get("/healthz")
     def healthz() -> dict:
         with pool.connection() as conn:

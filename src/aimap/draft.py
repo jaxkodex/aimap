@@ -15,14 +15,36 @@ from typing import Any
 import requests
 from psycopg import Connection
 
-from aimap.inbox import get_thread
-from aimap.parse import normalize_subject
+from aimap.inbox import get_message, get_thread
 
 log = logging.getLogger(__name__)
 
 MAX_THREAD_CHARS = 12000
 MAX_THREAD_MESSAGES = 6
-EXCERPT_CHARS = 50000
+
+
+class DraftError(Exception):
+    """Base for all draft errors."""
+
+
+class MessageNotFound(DraftError):
+    """The message does not exist."""
+
+
+class InstructionsTooLong(DraftError):
+    """The instructions field exceeded 2000 characters."""
+
+
+class DraftingNotConfigured(DraftError):
+    """Drafting is not configured (no API key or model)."""
+
+
+class ModelTimeout(DraftError):
+    """The model timed out."""
+
+
+class ModelRequestFailed(DraftError):
+    """The model request failed."""
 
 
 @dataclass(frozen=True)
@@ -32,30 +54,29 @@ class DraftConfig:
     model: str
     timeout: float
     max_tokens: int
-    
+
     def is_configured(self) -> bool:
         return self.api_key is not None and bool(self.model)
 
 
 def build_prompt(thread_messages: list[dict[str, Any]], instructions: str | None) -> str:
     """Build the prompt from thread messages (newest first) and optional instructions.
-    
+
     Returns a prompt that asks for a plain-text reply body only, no quoted original,
     no subject line inside the body.
     """
-    # Build thread context
     context_parts = []
     for msg in thread_messages:
         sender = msg.get("sender", "(unknown)")
         excerpt = msg.get("excerpt") or "(no body)"
         context_parts.append(f"From: {sender}\n{excerpt}\n")
-    
+
     context = "\n---\n\n".join(context_parts)
-    
+
     instructions_text = ""
     if instructions:
         instructions_text = f"\n\nUser instructions: {instructions}"
-    
+
     return f"""You are drafting a reply to this email thread (newest message first):
 
 {context}
@@ -74,70 +95,47 @@ def generate_draft(
     config: DraftConfig,
 ) -> dict[str, Any]:
     """Generate a draft reply for the given message.
-    
-    Raises HTTPException (404, 422, 502, 503) on error.
+
+    Raises MessageNotFound, InstructionsTooLong, DraftingNotConfigured,
+    ModelTimeout, or ModelRequestFailed on error.
     """
-    from fastapi import HTTPException
-    
-    # Check configuration
     if not config.is_configured():
-        raise HTTPException(503, "Drafting is not configured.")
-    
-    # Get the message to check if it exists and get reply info
-    row = conn.execute("""
-        SELECT m.id, m.from_email, m.subject, m.has_list_headers, c.action_bucket, c.signals
-        FROM messages m
-        LEFT JOIN LATERAL (
-            SELECT action_bucket, signals
-            FROM classifications WHERE message_id = m.id
-            ORDER BY created_at DESC, id DESC LIMIT 1
-        ) c ON true
-        WHERE m.id = %s
-    """, (message_id,)).fetchone()
-    
-    if row is None:
-        raise HTTPException(404, "no such message")
-    
-    msg_id, from_email, subject, bulk, action_bucket, signals = row
-    
-    # Calculate reply info
-    from aimap.inbox import needs_reply
-    reply_info = needs_reply(action_bucket, signals or {}, bulk)
+        raise DraftingNotConfigured("Drafting is not configured.")
+
+    if instructions and len(instructions) > 2000:
+        raise InstructionsTooLong("instructions too long")
+
+    msg = get_message(conn, message_id)
+    if msg is None:
+        raise MessageNotFound("no such message")
+
+    reply_info = msg.get("reply")
     needs = reply_info["needed"] if reply_info else False
     reason = reply_info["reason"] if reply_info else None
-    
-    # Validate instructions length
-    if instructions and len(instructions) > 2000:
-        raise HTTPException(422, "instructions too long")
-    
-    # Get thread
+
     thread_data = get_thread(conn, message_id, store)
     if not thread_data:
-        raise HTTPException(404, "no such message")
-    
-    # Cap the thread to MAX_THREAD_MESSAGES and MAX_THREAD_CHARS
+        raise MessageNotFound("no such message")
+
     messages = thread_data["messages"][:MAX_THREAD_MESSAGES]
     used_ids = []
     capped_messages = []
     total_chars = 0
-    
-    for msg in messages:
-        excerpt = msg.get("excerpt") or ""
+
+    for thread_msg in messages:
+        excerpt = thread_msg.get("excerpt") or ""
         if total_chars + len(excerpt) > MAX_THREAD_CHARS:
             break
-        capped_messages.append(msg)
-        used_ids.append(msg["message_id"])
+        capped_messages.append(thread_msg)
+        used_ids.append(thread_msg["message_id"])
         total_chars += len(excerpt)
-    
+
     if not capped_messages:
-        # Use at least the first message
         capped_messages = messages[:1]
         used_ids = [messages[0]["message_id"]]
-    
-    # Build prompt
+
     prompt = build_prompt(capped_messages, instructions)
-    
-    # Call the model
+
     try:
         response = requests.post(
             f"{config.base_url.rstrip('/')}/chat/completions",
@@ -157,25 +155,22 @@ def generate_draft(
         data = response.json()
         body = data["choices"][0]["message"]["content"].strip()
     except requests.Timeout as e:
-        raise HTTPException(502, "The model timed out.") from e
+        raise ModelTimeout("The model timed out.") from e
     except requests.RequestException as e:
         log.warning("draft model call failed", extra={"error": str(e)})
-        raise HTTPException(502, "The model request failed.") from e
+        raise ModelRequestFailed("The model request failed.") from e
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         log.warning("draft model response parse failed", extra={"error": str(e)})
-        raise HTTPException(502, "The model response was invalid.") from e
-    
-    # Build reply subject (add RE: once, never double it)
-    reply_subject = subject or ""
-    norm = normalize_subject(reply_subject)
-    if norm and not reply_subject.lower().strip().startswith("re:"):
+        raise ModelRequestFailed("The model response was invalid.") from e
+
+    reply_subject = msg["subject"] or ""
+    if reply_subject and not reply_subject.lower().strip().startswith("re:"):
         reply_subject = f"RE: {reply_subject}"
-    elif not norm:
-        reply_subject = "RE: "
-    
-    # Prepare to/cc lists (reply to sender)
-    to = [from_email] if from_email else []
-    
+    elif not reply_subject:
+        reply_subject = "RE:"
+
+    to = [msg["from_email"]] if msg["from_email"] else []
+
     return {
         "message_id": message_id,
         "needs_reply": needs,
