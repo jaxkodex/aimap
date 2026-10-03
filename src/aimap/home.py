@@ -5,6 +5,10 @@
               means "someone expects an answer", not "you have not replied".
     sorted    everything else, grouped by pattern insight, first tag, or bucket.
 
+A message the user handled in the app leaves act_now and waiting; one pushed to
+later keeps its section but sorts after every other card, newest 'later' last.
+That state comes in on the Item, so this module stays pure.
+
 The brief also carries today's traffic: for each hour of today in the caller's
 time zone, how many messages arrived in each section. `sorted_at` is when the
 newest classification was stored, passed in by the caller.
@@ -62,6 +66,8 @@ class Item:
     priority: float = 0.0
     signals: dict[str, Any] = field(default_factory=dict)
     profile: str | None = None
+    state: str | None = None            # None, "handled" or "later"
+    state_changed_at: datetime | None = None
 
     @property
     def sender(self) -> str:
@@ -98,12 +104,19 @@ def _card(item: Item) -> dict[str, Any]:
         "message_id": item.message_id, "account": item.account, "profile": item.profile, "sender": item.sender,
         "from_email": item.from_email, "subject": item.subject, "sent_at": item.sent_at, "unread": item.unread,
         "action_bucket": item.action_bucket, "importance": item.importance, "priority": item.priority,
-        "needs_review": item.needs_review, "reasons": reasons(item.signals),
+        "needs_review": item.needs_review, "reasons": reasons(item.signals), "state": item.state,
     }
 
 
 def _ts(item: Item) -> float:
     return item.sent_at.timestamp() if item.sent_at else 0.0
+
+
+def _later(item: Item) -> tuple[int, float]:
+    """Sort key prefix: later cards go after the rest, and the one marked most recently goes last."""
+    if item.state != "later":
+        return 0, 0.0
+    return 1, item.state_changed_at.timestamp() if item.state_changed_at else 0.0
 
 
 def section(item: Item) -> str:
@@ -129,12 +142,13 @@ def by_hour(items: list[Item], now: datetime, tz: tzinfo) -> list[dict[str, int]
 
 
 def build(items: list[Item], new_since: datetime, *, now: datetime | None = None, tz: tzinfo = UTC,
-          sorted_at: datetime | None = None) -> dict[str, Any]:
+          sorted_at: datetime | None = None, handled_today: int = 0) -> dict[str, Any]:
     """Home sections for the labelled messages in the window. Unlabelled ones only count as new."""
     inbox = [i for i in items if not i.from_self]
     labelled = [i for i in inbox if i.action_bucket]
-    act = sorted((i for i in labelled if i.action_bucket in ACT_NOW), key=lambda i: (-i.priority, -_ts(i)))
-    waiting = sorted((i for i in labelled if i.action_bucket in WAITING), key=_ts)
+    live = [i for i in labelled if i.state != "handled"]
+    act = sorted((i for i in live if i.action_bucket in ACT_NOW), key=lambda i: (_later(i), -i.priority, -_ts(i)))
+    waiting = sorted((i for i in live if i.action_bucket in WAITING), key=lambda i: (_later(i), _ts(i)))
     rest = [i for i in labelled if i.action_bucket not in ACT_NOW + WAITING]
 
     groups: dict[str, list[Item]] = {}
@@ -150,7 +164,7 @@ def build(items: list[Item], new_since: datetime, *, now: datetime | None = None
     return {
         "brief": {
             "new": new, "act_now": len(act), "waiting": len(waiting), "sorted": len(rest),
-            "unclassified": len(inbox) - len(labelled),
+            "unclassified": len(inbox) - len(labelled), "handled_today": handled_today,
             "text": brief_text(new, len(act), len(waiting)),
             "sorted_at": sorted_at,
             "by_hour": by_hour(inbox, now or datetime.now(UTC), tz),

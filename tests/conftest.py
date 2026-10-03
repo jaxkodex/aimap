@@ -105,7 +105,8 @@ def catalog():
     return FakeCatalog()
 
 
-_TABLES = "classifications, jobs, patterns, message_locations, messages, mailbox_state, accounts, profiles"
+_TABLES = ("classifications, jobs, patterns, message_state, message_locations, messages, mailbox_state, "
+           "accounts, profiles")
 
 
 @pytest.fixture(scope="session")

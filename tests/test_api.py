@@ -74,6 +74,13 @@ def test_every_data_route_needs_an_allowed_user(client, headers, status):
         assert client.get(path, headers=headers).status_code == status, path
 
 
+@pytest.mark.parametrize("headers, status", [
+    ({}, 401), ({"Authorization": "Bearer bad"}, 401), ({"Authorization": "Bearer stranger"}, 403),
+])
+def test_actions_need_an_allowed_user(client, headers, status):
+    assert client.post("/messages/1/actions", json={"action": "handled"}, headers=headers).status_code == status
+
+
 def test_me(client):
     assert client.get("/me", headers=AUTH).json() == {"uid": "u1", "email": ME}
 
@@ -89,6 +96,79 @@ def test_home(client, seeded):
     assert body["act_now"][0]["profile"] == "default"
     assert body["brief"]["sorted_at"] is not None
     assert len(body["brief"]["by_hour"]) == 24
+
+
+def act(client, message_id, action):
+    return client.post(f"/messages/{message_id}/actions", json={"action": action}, headers=AUTH)
+
+
+def test_action_round_trip_is_idempotent(client, seeded, pool):
+    mid = seeded["Sign-off needed"]
+    first = act(client, mid, "handled").json()
+    assert first["message_id"] == mid and first["state"] == "handled" and first["changed_at"]
+    assert act(client, mid, "handled").json()["state"] == "handled"
+    assert act(client, mid, "later").json()["state"] == "later"
+    assert client.get(f"/messages/{mid}", headers=AUTH).json()["state"] == "later"
+
+    assert act(client, mid, "undo").json() == {"message_id": mid, "state": None, "changed_at": None}
+    assert act(client, mid, "undo").json()["state"] is None  # undo twice is still fine
+    assert client.get(f"/messages/{mid}", headers=AUTH).json()["state"] is None
+    with pool.connection() as conn:
+        assert conn.execute("SELECT count(*) FROM message_state").fetchone()[0] == 0
+
+
+def test_action_records_the_signed_in_email(client, seeded, pool):
+    act(client, seeded["Offer letter"], "later")
+    with pool.connection() as conn:
+        assert conn.execute("SELECT changed_by FROM message_state").fetchall() == [(ME,)]
+
+
+def test_action_rejects_unknown_ids_and_bad_actions(client, seeded):
+    assert act(client, 999999, "handled").status_code == 404
+    assert act(client, seeded["PR notes"], "archive").status_code == 422
+    assert client.post(f"/messages/{seeded['PR notes']}/actions", json={}, headers=AUTH).status_code == 422
+
+
+def test_home_leaves_handled_messages_out(client, seeded):
+    act(client, seeded["Sign-off needed"], "handled")
+    act(client, seeded["Offer letter"], "handled")
+    body = client.get("/home", headers=AUTH).json()
+    assert body["act_now"] == [] and body["waiting"] == []
+    assert body["brief"]["act_now"] == 0 and body["brief"]["waiting"] == 0
+    assert body["brief"]["handled_today"] == 2
+    assert body["brief"]["new"] == 4  # they still arrived
+    other = client.get("/home", params={"account": "other@example.com"}, headers=AUTH).json()
+    assert other["brief"]["handled_today"] == 0  # handled_today follows the account filter
+
+
+def test_home_counts_only_todays_handled(client, seeded, pool):
+    act(client, seeded["Sign-off needed"], "handled")
+    assert client.get("/home", headers=AUTH).json()["brief"]["handled_today"] == 1
+    with pool.connection() as conn:  # yesterday's work is not today's count
+        conn.execute("UPDATE message_state SET changed_at = now() - interval '2 days'")
+    assert client.get("/home", headers=AUTH).json()["brief"]["handled_today"] == 0
+    act(client, seeded["Offer letter"], "later")  # later is not handled
+    assert client.get("/home", headers=AUTH).json()["brief"]["handled_today"] == 0
+
+
+def test_home_sorts_later_cards_last(client, seeded, pool):
+    with pool.connection() as conn:  # a second act_now card, lower priority than the seeded one
+        conn.execute("""
+            INSERT INTO classifications (message_id, profile_id, classifier_key, model, raw_answers,
+                importance, action_bucket, tags, source, needs_review, priority, signals)
+            SELECT %s, id, 'k2', 'jev-test', '{}', 'Medium', 'act_now', '{}', 'judgment', false, 1.0, '{}'
+            FROM profiles WHERE name = 'default'""", (seeded["PR notes"],))
+    assert [c["subject"] for c in client.get("/home", headers=AUTH).json()["act_now"]] == [
+        "Sign-off needed", "PR notes"]
+
+    act(client, seeded["Sign-off needed"], "later")
+    cards = client.get("/home", headers=AUTH).json()["act_now"]
+    assert [c["subject"] for c in cards] == ["PR notes", "Sign-off needed"]
+    assert [c["state"] for c in cards] == [None, "later"]
+
+    act(client, seeded["PR notes"], "later")  # marked last, so it now sorts last
+    assert [c["subject"] for c in client.get("/home", headers=AUTH).json()["act_now"]] == [
+        "Sign-off needed", "PR notes"]
 
 
 def test_home_traffic_uses_the_time_zone(client, seeded):
@@ -122,6 +202,7 @@ def test_message_detail_and_body(client, seeded):
     mid = seeded["Sign-off needed"]
     m = client.get(f"/messages/{mid}", headers=AUTH).json()
     assert m["sender"] == "Priya" and m["labels"]["action_bucket"] == "act_now"
+    assert m["account"] == ME and m["profile"] == "default"  # the same profile name Home cards carry
     assert m["labels"]["reasons"] == ["Mentions a deadline"]
     assert m["mailboxes"] == [{"mailbox": "INBOX", "flags": []}] and "s3_key" not in m
     assert client.get(f"/messages/{mid}/body", headers=AUTH).json()["text"] == "Body of message 1."

@@ -1,4 +1,7 @@
-"""HTTP API for the app: `aimap api`. Read-only over Postgres, bodies from S3 on request.
+"""HTTP API for the app: `aimap api`. Reads Postgres, bodies from S3 on request.
+
+The one write is aimap's own message state (handled, later, undo). The mailbox,
+the bucket and the labels are never changed; IMAP stays read-only.
 
 Every route except /healthz needs a Firebase ID token (see auth.py). Handlers are
 plain functions, so FastAPI runs them in its thread pool and they share the
@@ -15,6 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
+from pydantic import BaseModel
 
 from aimap import __version__, home, inbox
 from aimap.auth import AuthError, Forbidden, User, Verifier
@@ -42,6 +46,10 @@ def current_user(request: Request) -> User:
 
 # Module level, not inside create_app: FastAPI resolves these annotations by name.
 Authed = Annotated[User, Depends(current_user)]
+
+
+class Action(BaseModel):
+    action: Literal["handled", "later", "undo"]
 
 
 def create_app(pool: ConnectionPool, store: Store, verifier: Verifier) -> FastAPI:
@@ -84,10 +92,13 @@ def create_app(pool: ConnectionPool, store: Store, verifier: Verifier) -> FastAP
         except (ZoneInfoNotFoundError, ValueError) as e:
             raise HTTPException(400, f"unknown time zone: {tz}") from e
         now = datetime.now(UTC)
+        midnight = now.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
         with pool.connection() as conn:
             items = inbox.home_items(conn, now - timedelta(days=days), account)
             last = inbox.sorted_at(conn, account)
-        return home.build(items, new_since or now - timedelta(hours=24), now=now, tz=zone, sorted_at=last)
+            handled_today = inbox.handled_since(conn, midnight, account)
+        return home.build(items, new_since or now - timedelta(hours=24), now=now, tz=zone, sorted_at=last,
+                          handled_today=handled_today)
 
     @app.get("/messages")
     def messages(
@@ -116,6 +127,16 @@ def create_app(pool: ConnectionPool, store: Store, verifier: Verifier) -> FastAP
         if m["labels"]:
             m["labels"]["reasons"] = home.reasons(m["labels"]["signals"])
         return m
+
+    @app.post("/messages/{message_id}/actions")
+    def message_action(user: Authed, message_id: int, body: Action) -> dict:
+        """Mark a message handled or later, or undo either. Only aimap's own state changes."""
+        with pool.connection() as conn:
+            state = inbox.set_state(conn, message_id, None if body.action == "undo" else body.action,
+                                    changed_by=user.email)
+        if state is None:
+            raise HTTPException(404, "no such message")
+        return state
 
     @app.get("/messages/{message_id}/body")
     def message_body(_user: Authed, message_id: int) -> dict:

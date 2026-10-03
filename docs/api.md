@@ -1,7 +1,8 @@
 # HTTP API
 
-`aimap api` listens on `$PORT` (default 8080). It only reads: nothing in the
-mailbox, the bucket or the labels changes through it.
+`aimap api` listens on `$PORT` (default 8080). It writes one thing: aimap's own
+record of what you did with a message (handled, later). The mailbox, the bucket
+and the labels are never changed, and IMAP stays read-only.
 
 | Route | Returns |
 |---|---|
@@ -10,8 +11,9 @@ mailbox, the bucket or the labels changes through it.
 | `GET /accounts` | Each account with its profile, message count and unread count. |
 | `GET /home` | The Home screen: a brief, `act_now`, `waiting` and `sorted` sections. |
 | `GET /messages` | Messages newest first, with their latest labels. |
-| `GET /messages/{id}` | One message: metadata, labels, signals, reasons and mailboxes. |
+| `GET /messages/{id}` | One message: metadata, labels, signals, reasons, mailboxes and state. |
 | `GET /messages/{id}/body` | The text body, read from S3 for that request and not kept. |
+| `POST /messages/{id}/actions` | Marks a message handled or later, or undoes it. Returns its new state. |
 
 `/home` takes `account`, `days` (the window, default 7), `new_since` (for
 the brief's `new` count, default 24 hours ago) and `tz`. `act_now` holds the `act_now`
@@ -21,9 +23,15 @@ its first tag or its bucket. Reasons ("Mentions a deadline") and group
 summaries ("Uber, AWS Billing + 1 more") are templates over stored signals and
 senders, so the API never calls Jev. Mail the account sent itself is left out.
 Each card carries its account's `profile` name ("work", "personal"), which the
-app can show as a short account label.
+app can show as a short account label. `GET /messages/{id}` carries the same
+`profile`, next to its `account`, so the detail screen can show that label too.
 
-The brief also has `sorted_at`, when the newest classification was stored, and
+A message you marked handled is left out of `act_now` and `waiting` and of
+their brief counts. One pushed to later stays in its section but sorts after
+every other card. Each card carries `state`: `null` or `"later"`.
+
+The brief also has `sorted_at`, when the newest classification was stored,
+`handled_today`, how many messages you handled since local midnight in `tz`, and
 `by_hour`, today's traffic: 24 rows, one per hour, each counting the messages
 that arrived in `act_now`, `waiting`, `sorted` and `unclassified`. "Today" and
 its hours follow `tz`, an IANA time zone name such as `Europe/Madrid` (default
@@ -36,6 +44,25 @@ its hours follow `tz`, an IANA time zone name such as `Europe/Madrid` (default
 Unread and flagged come from the IMAP flags seen at ingestion. Mail read in
 another client still shows as unread. `waiting` means Jev thinks someone
 expects an answer, not that no reply was sent: Sent mail isn't matched yet.
+
+## Handled and later
+
+```
+POST /messages/12/actions      {"action": "handled" | "later" | "undo"}
+200                            {"message_id": 12, "state": "handled", "changed_at": "2026-09-28T09:00:00Z"}
+```
+
+`handled` takes the message off `act_now` and `waiting`. `later` keeps it where
+it is but sends it to the end of its section, and because every call refreshes
+`changed_at`, the message marked later most recently sorts last. `undo` drops
+the state, so `state` and `changed_at` come back `null`.
+
+The route is idempotent: sending the same action twice gives the same answer.
+An unknown id is a 404 and anything other than those three actions is a 422.
+The state is stored in Postgres with the verified email that set it, and
+`GET /messages/{id}` returns it as `state`: `null`, `"handled"` or `"later"`.
+Nothing is written to IMAP, so archiving, reading or labelling mail in another
+client is unaffected.
 
 ## Sign-in
 
