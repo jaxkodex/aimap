@@ -19,7 +19,7 @@ tests plus golden fixtures (see below).
 | `home.py` | `src/home.rs` | `tests/home_unit.rs` — full port of `test_home.py` |
 | `inbox.py` | `src/inbox.rs` | `tests/inbox_draft_db.rs` (needs_reply, cursors, paging, get_message/set_state/get_thread on real Postgres) |
 | `config.py` | `src/config.rs` | `tests/config_unit.rs` (port of the config parts of `test_config.py`); full `S3Config` moved here and re-exported from `storage` |
-| `classifier.py` | `src/classifier.rs` | `tests/classifier_db.rs` — full port of `test_classifier.py`: drain/run_forever with `concurrency` worker threads over `db::Pool`, skip-on-same-key, retry-then-succeed, permanent S3 miss, reclaim of dead workers' jobs, stop-event shutdown. The model call sits behind the `Asker` trait (fakes, like the Python suite); the real TypeSafe transport is not ported (closed SDK — not installable here, and untested in Python too) |
+| `classifier.py` | `src/classifier.rs` | `tests/classifier_db.rs` — full port of `test_classifier.py`: drain/run_forever with `concurrency` worker threads over `db::Pool`, skip-on-same-key, retry-then-succeed, permanent S3 miss, reclaim of dead workers' jobs, stop-event shutdown. The model call sits behind the `Asker` trait (fakes, like the Python suite); the real TypeSafe System One transport lives in `src/typesafe.rs` (wire-level `noul` mapping and response validation pinned by `tests/typesafe_unit.rs`, including a full HTTP exchange over an in-memory wire) |
 | `accounts.py` | `src/accounts.rs` | `tests/accounts_unit.rs` — full port of `test_accounts.py` + the env-account parts of `test_config.py`: env source with fallbacks and numeric suffix sorting, bucket file parse/dump (JSON shape byte-compatible), ETag-conditional writes with retry, last-good-copy on broken files, undecryptable accounts skipped |
 | `profiles.py` | `src/profiles.rs` | `tests/profiles_db.rs` on real Postgres (put/get/assign, patterns round-trip, validation, duplicates) + `parse_patterns` (JSON and a hand-rolled CSV reader pinned to Python's `csv` defaults) |
 | `ingest.py` | `src/ingest.rs` | `tests/ingest_db.rs` — full port of `test_ingest.py` against real Postgres + the S3 fake: first-sync window, incremental checkpoints, uidvalidity resync, per-batch commit + stop flag, vanished messages, legacy S3 checkpoint import. The mailbox sits behind the `MailSource` trait (`&mut dyn MailSource`; fakes in tests, `imap::ImapSource` in the worker) |
@@ -28,8 +28,9 @@ tests plus golden fixtures (see below).
 | `worker.py` | `src/worker.rs` | `tests/worker_db.rs` — full port of `test_worker.py` on real Postgres: per-account backoff, live add/remove/change, empty warning once, stop-aware run_forever. SIGTERM/SIGINT land via `src/signals.rs` (handler sets a flag, a watcher copies it into the stop event and the ingest stop flag) |
 | `backfill.py` | `src/backfill.rs` | `tests/backfill_db.rs` — unknown keys recorded through the ingestion catalog call, idempotent second run, skipped keys counted |
 | `supervise.py` | `src/supervise.rs` | `tests/supervise_unit.rs` — real child processes: one child exiting stops the others and passes its code (0 becomes 1), SIGTERM/SIGINT terminate the children, a SIGTERM-ignoring child is killed after the grace period |
-| `cli.py` | `src/cli.rs` + `src/main.rs` | `tests/cli_db.rs` — accounts commands on the S3 fake (add/list/update/disable/remove/set-password/rotate-key, login verification hook), DB admin commands on real Postgres (jobs status/retry, profiles/patterns, set-profile), backfill + jobs end-to-end, and the early exits (config 2, no DATABASE_URL 2, S3 3, migrate 4). `classify` and `api` refuse to start until the api batch ports the TypeSafe transport and axum/Firebase; `all` supervises the same three services |
-| `api.py`, `auth.py` | — | last (axum + Firebase JWT; HTTPS via the pure-Rust rustls provider already in the tree) |
+| `cli.py` | `src/cli.rs` + `src/main.rs` | `tests/cli_db.rs` — accounts commands on the S3 fake (add/list/update/disable/remove/set-password/rotate-key, login verification hook), DB admin commands on real Postgres (jobs status/retry, profiles/patterns, set-profile), backfill + jobs end-to-end, and the early exits (config 2, no DATABASE_URL 2, S3 3, migrate 4). `classify` runs the classifier with the TypeSafe transport (`JEV_BASE_URL` overrides the API base the closed SDK hardcodes), `api` serves the HTTP API, `all` supervises the same three services |
+| `api.py` | `src/api.rs` | `tests/api_db.rs` — full port of `test_api.py` (24 tests) on real Postgres + the S3 fake, driven through the router function directly (FastAPI's TestClient role): auth gating on every route, /me, /home (time zones via jiff's tzdb, account/day filters, by_hour), /messages paging + filters + cursors, detail with labels.reasons and no s3_key, actions round-trip with changed_by, body from S3, threads with quote stripping, /draft end-to-end through the route (422/404/503 paths included), plus one real-socket smoke test |
+| `auth.py` | `src/auth.rs` | `tests/auth_unit.rs` — full port of `test_auth.py`: RS256 verification against minted certificates (hand-rolled minimal X.509 DER walk + `rsa` crate, pure Rust), aud/iss/exp/iat with clock skew, garbage and wrong-key rejections, `authorize` (email verified + allowlist, fail closed), and the Cache-Control max-age certificate cache with a fake clock. The production transport fetches Google's x509 map over HTTPS and was checked against the live endpoint |
 
 Helper binaries (`cargo run --example …`): `dump` (message → meta/body JSON),
 `cipher` (Fernet encrypt/decrypt/rotate/keygen), `s3-cli` (list/head/get
@@ -137,11 +138,13 @@ follows the Python pattern: all S3 semantics (key math, conditional writes,
 error-code mapping, metadata sanitation) live in `Store` over an injectable
 `S3Client`. The real transport (`src/s3.rs`) signs with a hand-rolled SigV4
 pinned to a Python-computed signature, and its HTTP flow runs against moto —
-the same engine the Python suite uses. TLS is the one open gap: ureq runs
-without a TLS backend, so the transport speaks plain HTTP (moto/SeaweedFS
-accept it; AWS us-east-1 too — the production bucket was listed and read with
-it); HTTPS lands with the API batch via the pure-Rust rustls +
-rustls-rustcrypto provider.
+the same engine the Python suite uses. HTTP is `src/httpc.rs`, a small
+blocking HTTP/1.1 client of the repo's own (ureq's TLS feature hard-depends on
+ring, which the static musl build forbids): plain HTTP for moto/SeaweedFS and
+HTTPS via the same rustls + rustls-rustcrypto provider the IMAP client uses,
+verified against the live Google certificates endpoint. One connection per
+request (`Connection: close`); the S3 workload is a few requests per message,
+so no pooling.
 
 ## Known divergences from CPython
 
@@ -167,3 +170,20 @@ bites:
   parsed like `email.utils.parseaddr`.
 - Date parsing uses `mailparse::dateparse`; obsolete zone spellings may
   differ from `email.utils.parsedate_to_datetime` in edge cases.
+- The HTTP API runs on a small hand-rolled HTTP/1.1 server (thread per
+  connection, keep-alive, JSON responses) instead of FastAPI/uvicorn; request
+  lines are logged as one JSON record each (`"message": "request"`). FastAPI's
+  schema endpoint `/openapi.json` is not served (404) — Python only disabled
+  `/docs`.
+- Firebase verification follows Firebase's documented third-party flow:
+  RS256 against the `securetoken@system.gserviceaccount.com` x509 map, aud,
+  exp/iat with the same 10-second clock skew google-auth applies. Error
+  message strings differ from google-auth's (they are 401/403 payloads, not
+  pinned anywhere).
+- The TypeSafe transport speaks System One directly (the wire protocol the
+  closed SDK wraps, cross-checked against pi's reference JS client). The
+  recorded `model` is the requested model id, like the JS reference; API error
+  strings differ from the Python SDK's, and `JEV_BASE_URL` overrides the base
+  URL (Python hardcodes it inside the SDK).
+- `days`/`limit`/`filter`/datetime query validation mirrors FastAPI's 422s
+  with Rust wording; only the status codes are pinned by the ported tests.

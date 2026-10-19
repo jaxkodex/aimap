@@ -182,6 +182,12 @@ pub struct Store<C: S3Client> {
     pub client: C,
 }
 
+impl<C: S3Client + Clone> Clone for Store<C> {
+    fn clone(&self) -> Self {
+        Store { cfg: self.cfg.clone(), client: self.client.clone() }
+    }
+}
+
 /// `(body, user metadata)` of a stored message.
 pub type RawWithMetadata = (Vec<u8>, Vec<(String, String)>);
 

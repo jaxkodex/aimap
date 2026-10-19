@@ -1,13 +1,11 @@
-//! Real S3 transport: an [`S3Client`] over HTTP with AWS Signature V4.
+//! Real S3 transport: an [`S3Client`] over HTTP(S) with AWS Signature V4.
 //!
 //! Signing is implemented here (it is ~80 lines and golden-tested against a
 //! Python-computed signature in `tests/sigv4_golden.json`, which pins it to
-//! the AWS-published algorithm botocore uses). The HTTP client is `ureq`
-//! without TLS: production endpoints (`https://s3.<region>.amazonaws.com`)
-//! come online with the pure-Rust rustls provider in the API batch; today the
-//! transport speaks plain HTTP to S3-compatible servers (moto, SeaweedFS,
-//! MinIO) — the integration test runs against moto, the same engine the
-//! Python test suite uses.
+//! the AWS-published algorithm botocore uses). The HTTP client is [`crate::httpc`],
+//! so both plain HTTP (moto, SeaweedFS, MinIO — the integration test runs
+//! against moto, the same engine the Python test suite uses) and HTTPS via the
+//! pure-Rust rustls provider work, one connection per request.
 
 use jiff::Timestamp;
 use sha2::{Digest, Sha256};
@@ -32,22 +30,17 @@ pub struct S3Settings {
     pub scheme: String,
 }
 
+#[derive(Clone)]
 pub struct HttpS3Client {
     settings: S3Settings,
     bucket: String,
-    agent: ureq::Agent,
     /// deterministic clock for tests
     fixed_time: Option<Timestamp>,
 }
 
 impl HttpS3Client {
     pub fn new(bucket: impl Into<String>, settings: S3Settings) -> Self {
-        HttpS3Client {
-            settings,
-            bucket: bucket.into(),
-            agent: ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(60)).build(),
-            fixed_time: None,
-        }
+        HttpS3Client { settings, bucket: bucket.into(), fixed_time: None }
     }
 
     /// Pin the signing clock (tests).
@@ -182,28 +175,25 @@ impl HttpS3Client {
         SignedRequest { method: method.to_string(), url, headers }
     }
 
-    fn send(&self, req: &SignedRequest, body: Option<&[u8]>) -> Result<ureq::Response, S3Error> {
-        let mut r = self.agent.request(&req.method, &req.url);
-        for (k, v) in &req.headers {
-            r = r.set(k, v);
-        }
-        let result = match body {
-            Some(b) => r.send_bytes(b),
-            None => r.call(),
+    fn send(&self, req: &SignedRequest, body: Option<&[u8]>) -> Result<crate::httpc::Response, S3Error> {
+        // One-shot connections (Connection: close): S3 traffic here is a few
+        // requests per message, and the TLS client needs no pooled state.
+        let http = crate::httpc::Request {
+            method: &req.method,
+            url: &req.url,
+            headers: &req.headers,
+            body,
+            timeout: std::time::Duration::from_secs(60),
         };
-        match result {
-            Ok(resp) => Ok(resp),
-            Err(ureq::Error::Status(_, resp)) => Ok(resp), // non-2xx handled by callers
-            Err(ureq::Error::Transport(t)) => Err(S3Error { code: format!("NetworkError: {}", t) }),
-        }
+        crate::httpc::request(&http).map_err(|e| S3Error { code: format!("NetworkError: {e}") })
     }
 
-    fn error_code(resp: ureq::Response) -> S3Error {
+    fn error_code(resp: crate::httpc::Response) -> S3Error {
         // S3 error XML: <Error><Code>NoSuchKey</Code>...; fall back to status
-        let status = resp.status();
-        if let Ok(body) = resp.into_string() {
-            if let Some(code) = xml_text(&body, "Code") {
-                return S3Error { code };
+        let status = resp.status;
+        if let Ok(body) = std::str::from_utf8(&resp.body) {
+            if let Some(code) = xml_text(body, "Code") {
+                return S3Error { code: code.to_string() };
             }
         }
         S3Error { code: status.to_string() }
@@ -222,7 +212,7 @@ impl S3Client for HttpS3Client {
         debug_assert_eq!(bucket, self.bucket, "one client per bucket");
         let req = self.sign("HEAD", &uri_encode_path(key), &[], None, &[], b"");
         let resp = self.send(&req, None)?;
-        match resp.status() {
+        match resp.status {
             200 => Ok(resp.header("ETag").map(str::to_string)),
             404 | 410 => Ok(None),
             _ => Err(Self::error_code(resp)),
@@ -233,22 +223,16 @@ impl S3Client for HttpS3Client {
         debug_assert_eq!(bucket, self.bucket);
         let req = self.sign("GET", &uri_encode_path(key), &[], None, &[], b"");
         let resp = self.send(&req, None)?;
-        match resp.status() {
+        match resp.status {
             200 => {
                 let etag = resp.header("ETag").unwrap_or_default().to_string();
                 let mut metadata = Vec::new();
-                for name in resp.headers_names() {
-                    if let Some(meta) = name.strip_prefix("x-amz-meta-") {
-                        if let Some(v) = resp.header(&name) {
-                            metadata.push((meta.to_string(), v.to_string()));
-                        }
+                for (name, value) in &resp.headers {
+                    if let Some(meta) = name.to_ascii_lowercase().strip_prefix("x-amz-meta-") {
+                        metadata.push((meta.to_string(), value.clone()));
                     }
                 }
-                // bodies are raw RFC 822 bytes: read binary, never as text
-                use std::io::Read;
-                let mut body = Vec::new();
-                resp.into_reader().read_to_end(&mut body).map_err(|e| S3Error { code: format!("NetworkError: {e}") })?;
-                Ok(Some(S3Object { body, etag, metadata }))
+                Ok(Some(S3Object { body: resp.body, etag, metadata }))
             }
             404 | 410 => {
                 // moto gives a proper XML code; plain 404 also maps to missing
@@ -279,7 +263,7 @@ impl S3Client for HttpS3Client {
         }
         let req = self.sign("PUT", &uri_encode_path(key), &[], Some(content_type), &extra_amz, body);
         let resp = self.send(&req, Some(body))?;
-        match resp.status() {
+        match resp.status {
             200 => Ok(resp.header("ETag").unwrap_or_default().to_string()),
             412 => Err(S3Error { code: "PreconditionFailed".to_string() }),
             _ => Err(Self::error_code(resp)),
@@ -300,12 +284,10 @@ impl S3Client for HttpS3Client {
             }
             let req = self.sign("GET", "", &query, None, &[], b"");
             let resp = self.send(&req, None)?;
-            if resp.status() != 200 {
+            if resp.status != 200 {
                 return Err(Self::error_code(resp));
             }
-            let body = resp
-                .into_string()
-                .map_err(|e| S3Error { code: format!("NetworkError: {e}") })?;
+            let body = String::from_utf8_lossy(&resp.body).into_owned();
             for m in KEY_RE.captures_iter(&body) {
                 keys.push(html_escape::decode_html_entities(&m[1]).into_owned());
             }
@@ -324,7 +306,7 @@ impl S3Client for HttpS3Client {
         debug_assert_eq!(bucket, self.bucket);
         let req = self.sign("HEAD", "", &[], None, &[], b"");
         let resp = self.send(&req, None)?;
-        match resp.status() {
+        match resp.status {
             200 => Ok(()),
             404 => Err(S3Error { code: "404".to_string() }),
             _ => Err(Self::error_code(resp)),

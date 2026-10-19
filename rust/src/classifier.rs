@@ -371,4 +371,14 @@ where
     pub fn run_forever(&self) {
         self.run(true);
     }
+
+    /// SIGTERM/SIGINT set the stop event (like the worker's; there is no
+    /// ingest flag to stop here, so the watcher gets a throwaway one).
+    pub fn install_signal_handlers(&self) {
+        crate::signals::install();
+        let _ = crate::signals::spawn_watcher(
+            &self.stop,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+    }
 }

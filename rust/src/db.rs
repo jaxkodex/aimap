@@ -8,7 +8,7 @@
 //! package, so both runtimes share exactly one schema source.
 
 use include_dir::{include_dir, Dir};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use postgres::{Client, GenericClient};
 use regex::Regex;
@@ -183,9 +183,14 @@ impl From<postgres::Error> for DbError {
 /// psycopg_pool grows lazily up to `max_size` and hands connections out
 /// round-robin; this one does the same with a mutex + condvar. Connections
 /// come back on drop (the `with pool.connection()` context in Python).
+#[derive(Clone)]
 pub struct Pool {
+    inner: Arc<PoolInner>,
+}
+
+struct PoolInner {
     dsn: String,
-    inner: Mutex<PoolState>,
+    state: Mutex<PoolState>,
     idle: Condvar,
 }
 
@@ -217,9 +222,9 @@ impl std::ops::DerefMut for PooledConnection<'_> {
 impl Drop for PooledConnection<'_> {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
-            let mut state = self.pool.inner.lock().unwrap();
+            let mut state = self.pool.inner.state.lock().unwrap();
             state.idle.push(client);
-            self.pool.idle.notify_one();
+            self.pool.inner.idle.notify_one();
         }
     }
 }
@@ -228,9 +233,11 @@ impl Pool {
     /// Open a pool with one warm connection (`min_size=1`, `pool.wait(30)`).
     pub fn open(dsn: &str, max_size: usize) -> Result<Pool, postgres::Error> {
         let pool = Pool {
-            dsn: dsn.to_string(),
-            inner: Mutex::new(PoolState { idle: Vec::new(), total: 0, max_size }),
-            idle: Condvar::new(),
+            inner: Arc::new(PoolInner {
+                dsn: dsn.to_string(),
+                state: Mutex::new(PoolState { idle: Vec::new(), total: 0, max_size }),
+                idle: Condvar::new(),
+            }),
         };
         drop(pool.get()?);
         Ok(pool)
@@ -239,14 +246,15 @@ impl Pool {
     /// Check a connection out, creating one if the pool is below max_size,
     /// blocking until another user returns one otherwise.
     pub fn get(&self) -> Result<PooledConnection<'_>, postgres::Error> {
-        let mut state = self.inner.lock().unwrap();
+        let pool = &self.inner;
+        let mut state = pool.state.lock().unwrap();
         loop {
             if let Some(client) = state.idle.pop() {
                 return Ok(PooledConnection { pool: self, client: Some(client) });
             }
             if state.total < state.max_size {
                 state.total += 1;
-                match Client::connect(&self.dsn, postgres::NoTls) {
+                match Client::connect(&pool.dsn, postgres::NoTls) {
                     Ok(client) => {
                         return Ok(PooledConnection { pool: self, client: Some(client) });
                     }
@@ -256,12 +264,12 @@ impl Pool {
                     }
                 }
             }
-            state = self.idle.wait(state).unwrap();
+            state = pool.idle.wait(state).unwrap();
         }
     }
 
     /// Number of connections currently open (idle + checked out).
     pub fn size(&self) -> usize {
-        self.inner.lock().unwrap().total
+        self.inner.state.lock().unwrap().total
     }
 }

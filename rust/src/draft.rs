@@ -95,8 +95,43 @@ pub enum TransportError {
     Failed(String),
 }
 
-pub trait ChatTransport {
+pub trait ChatTransport: Send + Sync {
     fn post(&self, call: &ModelCall) -> Result<Value, TransportError>;
+}
+
+/// The production transport: one `chat/completions` POST through
+/// [`crate::httpc`] (plain or TLS, per the URL's scheme). Error mapping
+/// follows `generate_draft`'s except clauses: timeouts become
+/// [`TransportError::Timeout`] (→ 502 `ModelTimeout`), everything else the
+/// generic [`TransportError::Failed`] (→ 502 `ModelRequestFailed`).
+#[derive(Clone, Copy, Default)]
+pub struct HttpChatTransport;
+
+impl ChatTransport for HttpChatTransport {
+    fn post(&self, call: &ModelCall) -> Result<Value, TransportError> {
+        let body = serde_json::to_vec(&call.payload)
+            .map_err(|e| TransportError::Failed(format!("cannot encode the model request: {e}")))?;
+        let headers = vec![
+            ("Authorization".to_string(), call.authorization.clone()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        let req = crate::httpc::Request {
+            method: "POST",
+            url: &call.url,
+            headers: &headers,
+            body: Some(&body),
+            timeout: std::time::Duration::from_secs(call.timeout_secs.max(1)),
+        };
+        let resp = crate::httpc::request(&req).map_err(|e| match e {
+            crate::httpc::HttpError::Timeout => TransportError::Timeout,
+            other => TransportError::Failed(other.to_string()),
+        })?;
+        if !(200..300).contains(&resp.status) {
+            // response.raise_for_status()
+            return Err(TransportError::Failed(format!("HTTP {}", resp.status)));
+        }
+        serde_json::from_slice(&resp.body).map_err(|e| TransportError::Failed(format!("invalid JSON: {e}")))
+    }
 }
 
 /// Build the prompt from thread messages (newest first) and optional
@@ -253,7 +288,7 @@ impl From<DraftError> for GenerateError {
 /// The full `generate_draft`: message metadata and thread from Postgres,
 /// excerpts from S3, prompt, model call, and the draft the API returns.
 /// `now` is filled in as `created_at` by the caller's clock.
-pub fn generate_draft<C: postgres::GenericClient, S: crate::storage::S3Client, T: ChatTransport>(
+pub fn generate_draft<C: postgres::GenericClient, S: crate::storage::S3Client, T: ChatTransport + ?Sized>(
     conn: &mut C,
     store: &Store<S>,
     transport: &T,

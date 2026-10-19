@@ -216,3 +216,87 @@ fn set_db_name(url: &str, db: &str) -> String {
         _ => format!("{}/{}", url, db),
     }
 }
+
+// --------------------------------------------------------------------------------------
+// in-memory wire: two ends, each with an inbox queue; writes go to the peer's
+// inbox (the pair the imap and http wire tests drive)
+// --------------------------------------------------------------------------------------
+
+#[derive(Default)]
+struct WireQueue {
+    bytes: std::collections::VecDeque<u8>,
+    eof: bool,
+}
+
+type WireShared = std::sync::Arc<(std::sync::Mutex<WireQueue>, std::sync::Condvar)>;
+
+pub struct WireHalf {
+    inbox: WireShared,
+    peer: WireShared,
+}
+
+pub fn wire_pair() -> (WireHalf, WireHalf) {
+    fn shared() -> WireShared {
+        std::sync::Arc::new((std::sync::Mutex::new(WireQueue::default()), std::sync::Condvar::new()))
+    }
+    let a = shared();
+    let b = shared();
+    (
+        WireHalf { inbox: a.clone(), peer: b.clone() },
+        WireHalf { inbox: b, peer: a },
+    )
+}
+
+impl WireHalf {
+    fn signal_eof(peer: &WireShared) {
+        let (lock, cv) = &**peer;
+        let mut q = lock.lock().unwrap();
+        q.eof = true;
+        cv.notify_all();
+    }
+}
+
+impl Drop for WireHalf {
+    fn drop(&mut self) {
+        Self::signal_eof(&self.peer);
+    }
+}
+
+impl std::io::Read for WireHalf {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let (lock, cv) = &*self.inbox;
+        let mut q = lock.lock().unwrap();
+        loop {
+            if !q.bytes.is_empty() {
+                let n = buf.len().min(q.bytes.len());
+                for slot in buf.iter_mut().take(n) {
+                    *slot = q.bytes.pop_front().unwrap();
+                }
+                return Ok(n);
+            }
+            if q.eof {
+                return Ok(0);
+            }
+            let (nq, _timeout) = cv
+                .wait_timeout(q, std::time::Duration::from_secs(30))
+                .unwrap();
+            q = nq;
+        }
+    }
+}
+
+impl std::io::Write for WireHalf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let (lock, cv) = &*self.peer;
+        let mut q = lock.lock().unwrap();
+        if q.eof {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "peer went away"));
+        }
+        q.bytes.extend(buf.iter().copied());
+        cv.notify_all();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

@@ -12,6 +12,7 @@ use crate::catalog::PgCatalog;
 use crate::config::{self, Settings, S3Config};
 use crate::crypto::Cipher;
 use crate::db::{self, Pool};
+use crate::draft;
 use crate::imap::ImapSource;
 use crate::logs::{LogValue, Logger};
 use crate::profiles;
@@ -22,6 +23,7 @@ use crate::worker::Worker;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const VERSION: &str = "0.1.0";
@@ -301,7 +303,7 @@ fn get(env: &HashMap<String, String>, name: &str) -> String {
 }
 
 /// The `main(argv)` of Python. Returns the process exit code.
-pub fn main_with<C: S3Client>(env: &HashMap<String, String>, argv: &[String], hooks: &mut Hooks<C>) -> i32 {
+pub fn main_with<C: S3Client + Send + Sync + Clone + 'static>(env: &HashMap<String, String>, argv: &[String], hooks: &mut Hooks<C>) -> i32 {
     let mut args: Vec<String> = argv.to_vec();
     // the image's ENTRYPOINT is aimap; accept "aimap migrate" as a command too
     if args.first().map(String::as_str) == Some("aimap") {
@@ -433,7 +435,7 @@ pub fn main_with<C: S3Client>(env: &HashMap<String, String>, argv: &[String], ho
 // services (run, once, check, classify, backfill, api)
 // --------------------------------------------------------------------------------------
 
-fn service_command<C: S3Client>(
+fn service_command<C: S3Client + Send + Sync + Clone + 'static>(
     command: &Command,
     settings: &Settings,
     env: &HashMap<String, String>,
@@ -475,16 +477,45 @@ fn service_command<C: S3Client>(
             ]);
             0
         }
-        Command::Api => serve_api(settings, log),
-        Command::Classify { once: _ } => {
-            if settings.classifier.api_key.is_none() {
+        Command::Api => serve_api(settings, pool, &store, log),
+        Command::Classify { once } => {
+            let Some(api_key) = settings.classifier.api_key.clone() else {
                 log.error("JEV_API_KEY is required for classify", &[]);
                 return 2;
+            };
+            let cs = settings.classifier.clone();
+            let base_url = env
+                .get("JEV_BASE_URL")
+                .cloned()
+                .filter(|u| !u.trim().is_empty())
+                .unwrap_or_else(|| crate::typesafe::DEFAULT_BASE_URL.to_string());
+            let classifier = crate::classifier::Classifier {
+                settings: cs.clone(),
+                pool,
+                store: &store,
+                asker_factory: {
+                    let base_url = base_url.clone();
+                    move || {
+                        Box::new(crate::typesafe::TypeSafeAsker::new(
+                            api_key.clone(),
+                            cs.model.clone(),
+                            base_url.clone(),
+                            Duration::from_secs_f64(cs.request_timeout),
+                        )) as Box<dyn crate::classifier::Asker>
+                    }
+                },
+                stop: crate::classifier::StopEvent::new(),
+                idle_wait: 5.0,
+                reclaim_every: 60.0,
+            };
+            classifier.install_signal_handlers();
+            if *once {
+                let n = classifier.drain();
+                log.info("classify pass complete", &[("processed", LogValue::Int(n as i64))]);
+            } else {
+                classifier.run_forever();
             }
-            // the TypeSafe transport is not ported yet (closed SDK); the
-            // classifier itself is (see classifier.rs and its test suite)
-            log.error("the TypeSafe transport is not part of the Rust port yet", &[]);
-            2
+            0
         }
         Command::Check => {
             let mut source = match account_source(settings, &store, env) {
@@ -529,20 +560,52 @@ fn service_command<C: S3Client>(
     }
 }
 
-/// The HTTP API is the last batch of the port (axum + Firebase JWT); until it
-/// lands, refuse with the same settings checks the Python entry point does.
-fn serve_api(settings: &Settings, log: &Logger) -> i32 {
+/// The HTTP API: Firebase token verification, the draft config from the
+/// environment, and the threaded server until the process is killed.
+fn serve_api<C: S3Client + Send + Sync + Clone + 'static>(
+    settings: &Settings,
+    pool: &Pool,
+    store: &Store<C>,
+    log: &Logger,
+) -> i32 {
     let a = &settings.api;
-    if a.firebase_project_id.is_none() {
+    let Some(project_id) = a.firebase_project_id.clone() else {
         log.error("FIREBASE_PROJECT_ID is required for api", &[]);
         return 2;
-    }
+    };
     if a.allowed_emails.is_empty() {
         log.error("AIMAP_ALLOWED_EMAILS is required for api: nobody could sign in", &[]);
         return 2;
     }
-    log.error("the HTTP API is not part of the Rust port yet", &[]);
-    2
+    let verifier = crate::auth::FirebaseVerifier::new(&project_id, a.allowed_emails.clone());
+    let d = &a.draft;
+    let draft_config = draft::DraftConfig {
+        base_url: d.base_url.clone(),
+        api_key: d.api_key.clone(),
+        model: d.model.clone(),
+        timeout_secs: d.timeout.max(1.0) as u64,
+        max_tokens: d.max_tokens.max(0) as u32,
+        reasoning_effort: d.reasoning_effort.clone(),
+    };
+    let state = Arc::new(crate::api::AppState {
+        pool: pool.clone(),
+        store: store.clone(),
+        verifier: Arc::new(verifier),
+        draft_config: Some(draft_config),
+        draft_transport: Arc::new(draft::HttpChatTransport),
+        log: Logger { name: "aimap.api".into(), ..log.clone() },
+    });
+    log.info("api starting", &[
+        ("port", LogValue::Int(a.port as i64)),
+        ("allowed_emails", LogValue::Int(a.allowed_emails.len() as i64)),
+    ]);
+    match crate::api::serve(state, &a.host, a.port as u16) {
+        Ok(()) => 0,
+        Err(e) => {
+            log.error("cannot bind the API server", &[("error", LogValue::str(e.to_string()))]);
+            1
+        }
+    }
 }
 
 fn account_source<'a, C: S3Client>(
