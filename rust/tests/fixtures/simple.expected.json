@@ -1,0 +1,15 @@
+{
+  "meta": {
+    "rfc822_message_id": "<m1@example.com>",
+    "from_email": "ana@example.com",
+    "from_name": "Ana Diaz",
+    "subject": "Quarterly report",
+    "sent_at": "2026-01-01T10:00:00Z",
+    "in_reply_to": null,
+    "references": null,
+    "has_list_headers": false
+  },
+  "thread_id": "<m1@example.com>",
+  "attachments": [],
+  "body_text": "Hi, the report is attached.\n--\nAna"
+}

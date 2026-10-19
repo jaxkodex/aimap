@@ -1,0 +1,22 @@
+{
+ "inputs": {
+  "access_key": "AKIDEXAMPLE",
+  "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+  "region": "us-east-1",
+  "bucket": "aimap-test",
+  "amz_date": "20260101T000000Z",
+  "datestamp": "20260101",
+  "key": "t/raw/me%40x/%5BGmail%5D/1/2.eml",
+  "payload_hex": "726177206d657373616765206279746573",
+  "content_type": "message/rfc822",
+  "virtual_host": true
+ },
+ "expected": {
+  "canonical_request": "PUT\n/t/raw/me%40x/%5BGmail%5D/1/2.eml\n\ncontent-type:message/rfc822\nhost:aimap-test.s3.us-east-1.amazonaws.com\nx-amz-content-sha256:1f0d6a8fb1a08ce7c449da7b65d1b86b361f9e7cd980d66a1c10303dad4e6d0d\nx-amz-date:20260101T000000Z\n\ncontent-type;host;x-amz-content-sha256;x-amz-date\n1f0d6a8fb1a08ce7c449da7b65d1b86b361f9e7cd980d66a1c10303dad4e6d0d",
+  "string_to_sign": "AWS4-HMAC-SHA256\n20260101T000000Z\n20260101/us-east-1/s3/aws4_request\n32f08d8be8494a3ef6e53e968abab08936450dcb88d3c7d5be94627c845f19b9",
+  "payload_hash": "1f0d6a8fb1a08ce7c449da7b65d1b86b361f9e7cd980d66a1c10303dad4e6d0d",
+  "signature": "932fe8765e1a33772b0f4e2cb93e6b40da944d84b71b3cd3ed8b3396f312bb17",
+  "authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/us-east-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=932fe8765e1a33772b0f4e2cb93e6b40da944d84b71b3cd3ed8b3396f312bb17",
+  "x_amz_date": "20260101T000000Z"
+ }
+}

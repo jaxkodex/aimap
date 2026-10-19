@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "rfc822_message_id": "<files-1@big.example>",
+    "from_email": "big@example.com",
+    "from_name": "Big",
+    "subject": "Files",
+    "sent_at": "2026-01-01T08:00:00Z",
+    "in_reply_to": null,
+    "references": null,
+    "has_list_headers": false
+  },
+  "thread_id": "<files-1@big.example>",
+  "attachments": [
+    "report.pdf",
+    "notes.txt",
+    "data.zip"
+  ],
+  "body_text": "See attached."
+}

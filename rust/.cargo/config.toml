@@ -1,0 +1,21 @@
+# Fully self-contained build: no system gcc/binutils required.
+# Uses the musl target (static CRT ships with rustup) and rustup's own rust-lld.
+# Consequence: only pure-Rust dependencies are allowed (no C-backed crates).
+[target.x86_64-unknown-linux-musl]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "linker-flavor=ld.lld",
+    "-C", "linker=rust-lld",
+    "-C", "link-self-contained=yes",
+]
+
+[build]
+target = "x86_64-unknown-linux-musl"
+
+# ring/rustls need a C compiler for the target; zig cc fills that role in
+# linker-less environments. On normal machines with gcc these are inert
+# (the env vars simply point at a compiler that understands the flags).
+[env]
+CC_x86_64_unknown_linux_musl = "cc-musl-shim"
+CXX_x86_64_unknown_linux_musl = "cc-musl-shim"
+AR_x86_64_unknown_linux_musl = "zig-ar"

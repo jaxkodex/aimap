@@ -1,0 +1,80 @@
+{
+  "generate_key_sample": "Qft6iw_Y4ibragUM3lejKVnDObnd3o2OpGMFK4P2OSY=",
+  "cases": [
+    {
+      "name": "simple",
+      "keys": [
+        "b3TiGUfb1Q0Lc7bK1whlPgt7LDqNLcNfAujGox5UCTw="
+      ],
+      "token": "gAAAAABq1J-MFfAu55n7oGZhsd4SldJng65O2ZnqkH4z0nG7TqU07xnpjRWivafwBYg-47B8_c2ovLaMhjelZ96VkmfzNzgTTAMI-LTO55aE3WgjwEWrJrRziqHQcbHFYMMy8-POa71F",
+      "user": "me@x.com",
+      "expect_password": "s3cret"
+    },
+    {
+      "name": "unicode",
+      "keys": [
+        "BIKIqbgXW9OEO2s4_9eLZ-Lz7Nk4SONsTUsv9qsBNB4="
+      ],
+      "token": "gAAAAABq1J-MitUt23jbpHBr7maumsncXkCGi747VTyWcCZ3zYfa8wDSszzGmd8r7WMS3xLMPUQFq_xDrK-8q4zS2uY1ibBdlFouEucpFsBH-nR-gef_S7pUbl9_HY6yDtWIRQUTcXOFNeNhZcc-fpNUZXOuF-o2xuXjhbNhweoq88yIIHHFC5U=",
+      "user": "josé@x.com",
+      "expect_password": "contraseña-ñ-🔐"
+    },
+    {
+      "name": "empty_password",
+      "keys": [
+        "BIKIqbgXW9OEO2s4_9eLZ-Lz7Nk4SONsTUsv9qsBNB4="
+      ],
+      "token": "gAAAAABq1J-MHZw5jvryHBF7jHTgBjnZYZ1hLdb4GqNw87fQeIxMP0Vkn-sUIvkpr96_zfmyv47FUJtPrbclx-pUVOe1-V05jBLRzy2gXZWbFt1BtVObZ1hCLhOJpOfjJGppE15-aBT-",
+      "user": "a@x.com",
+      "expect_password": ""
+    },
+    {
+      "name": "rotation_secondary_key",
+      "keys": [
+        "BIKIqbgXW9OEO2s4_9eLZ-Lz7Nk4SONsTUsv9qsBNB4=",
+        "b3TiGUfb1Q0Lc7bK1whlPgt7LDqNLcNfAujGox5UCTw="
+      ],
+      "token": "gAAAAABq1J-M9eGIbJWLokQqicmeflwPXHYwlmbVMg7R1i9aQm2BMfoCihhftAZFPz8HMaqj10FCdKJ5KAdiznDfUAdWK-v4QACxO2rDcxxGm9b3TeJfeg43MX_DrpD-jPQ_YEXc0PuM",
+      "user": "a@x.com",
+      "expect_password": "legacy-pw"
+    },
+    {
+      "name": "rotation_third_key",
+      "keys": [
+        "Qft6iw_Y4ibragUM3lejKVnDObnd3o2OpGMFK4P2OSY=",
+        "BIKIqbgXW9OEO2s4_9eLZ-Lz7Nk4SONsTUsv9qsBNB4=",
+        "b3TiGUfb1Q0Lc7bK1whlPgt7LDqNLcNfAujGox5UCTw="
+      ],
+      "token": "gAAAAABq1J-MP6ebrr8hlSEocBaZTQGdTtp5V6RF0jTqGQJZXynhpGBnf8MhKXJ0e4UT-85Io0oW8eYCPImjtuQgmKk2NC63gybga7a1NYaRln-8UyYIZB6_1L8g3wJthP0GOa27dH_Y",
+      "user": "a@x.com",
+      "expect_password": "deep-legacy"
+    },
+    {
+      "name": "wrong_user_rejected",
+      "keys": [
+        "b3TiGUfb1Q0Lc7bK1whlPgt7LDqNLcNfAujGox5UCTw="
+      ],
+      "token": "gAAAAABq1J-MCVEcWdfAV6ngXGO05f974R2hxauQiROvv7WJBuoZ_idRAPHFoO3lWdDsFXQxCOHin65yY_Y2wCOsAJUfaA3UDX5hm02S_w6_YJcEuz8XAIwy_oM0M01PvcIYU5n7pI_r",
+      "user": "b@x.com",
+      "expect_error": "different account"
+    },
+    {
+      "name": "wrong_key_rejected",
+      "keys": [
+        "BIKIqbgXW9OEO2s4_9eLZ-Lz7Nk4SONsTUsv9qsBNB4="
+      ],
+      "token": "gAAAAABq1J-M_bsol7sDrXU5i9UmzSy-QjK6bdWJMasbmIAzlRSmJW9bvsVF2UeXCs2TRpRuW5jAetnxi-KlYdnpfywnbnEQHjSGZAj3wsCkyhprYGLFOgfcciI5k-VUWB-OaAch6hB5",
+      "user": "a@x.com",
+      "expect_error": "wrong key"
+    },
+    {
+      "name": "corrupted_token",
+      "keys": [
+        "b3TiGUfb1Q0Lc7bK1whlPgt7LDqNLcNfAujGox5UCTw="
+      ],
+      "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "user": "a@x.com",
+      "expect_error": "wrong key"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "rfc822_message_id": "<m2@example.com>",
+    "from_email": "jose@example.com",
+    "from_name": "José García",
+    "subject": "RE: Meeting Invariants",
+    "sent_at": "2026-01-02T07:30:00Z",
+    "in_reply_to": "<m1@example.com>",
+    "references": "<m0@example.com> <m1@example.com>",
+    "has_list_headers": false
+  },
+  "thread_id": "<m0@example.com>",
+  "attachments": [],
+  "body_text": "Sounds good.\nOn Thu, Jan 1, 2026 at 10:00 AM Ana <ana@example.com> wrote:\n> Hi, the report is attached.",
+  "stripped": "Sounds good."
+}

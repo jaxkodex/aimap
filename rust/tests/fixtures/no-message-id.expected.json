@@ -1,0 +1,15 @@
+{
+  "meta": {
+    "rfc822_message_id": "sha256:c27299ee04ed91cbe69bfa2058ec43436c267485db187a69d32c04a127db6bd1",
+    "from_email": "deals@shop.example",
+    "from_name": "Shop",
+    "subject": "Order confirmation",
+    "sent_at": "2026-01-01T11:30:00Z",
+    "in_reply_to": null,
+    "references": null,
+    "has_list_headers": false
+  },
+  "thread_id": "thread:b28c9f6af798dc7d",
+  "attachments": [],
+  "body_text": "Your order has shipped."
+}

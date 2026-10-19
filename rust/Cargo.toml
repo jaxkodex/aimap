@@ -1,0 +1,31 @@
+[package]
+name = "aimap"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of aimap (leaf-first migration; parse module first)"
+license = "MIT"
+
+[lib]
+name = "aimap"
+path = "src/lib.rs"
+
+[dependencies]
+mailparse = "0.15"
+charset = "0.1"
+fernet = { version = "0.2", default-features = false, features = ["rustcrypto"] }
+base64 = "0.22"
+getrandom = "0.2"
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+
+include_dir = "0.7"
+ureq = { version = "2", default-features = false } # HTTP only for now; HTTPS lands with the rustls-rustcrypto provider (api batch)
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+jiff = { version = "0.2", features = ["serde"] }
+regex = "1"
+html-escape = "0.2"
+hmac = "0.12"
+percent-encoding = "2"
+
+[dev-dependencies]

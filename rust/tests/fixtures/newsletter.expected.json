@@ -1,0 +1,18 @@
+{
+  "meta": {
+    "rfc822_message_id": "<nl-2026-01@shop.example>",
+    "from_email": "deals@shop.example",
+    "from_name": "Weekly Deals",
+    "subject": "Wöchentlicher Newsletter",
+    "sent_at": "2026-01-01T14:00:00Z",
+    "in_reply_to": null,
+    "references": null,
+    "has_list_headers": true
+  },
+  "thread_id": "<nl-2026-01@shop.example>",
+  "attachments": [
+    "logo.png"
+  ],
+  "body_text": "Hello & welcome to our newsletter\nDeal:",
+  "body_text_100": "Hello & welcome to our newsletter\nDeal:"
+}
