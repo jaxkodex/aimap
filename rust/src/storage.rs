@@ -16,12 +16,9 @@
 
 use serde_json::Value;
 
-/// The parts of S3Config the Store needs (rest arrives with the config port).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct S3Config {
-    pub bucket: String,
-    pub prefix: String,
-}
+/// The full S3Config lives in [`crate::config`] (as in Python); re-exported
+/// here because everything storage touches goes through it.
+pub use crate::config::S3Config;
 
 /// Make an account or mailbox name safe as one key segment
 /// (`"[Gmail]/All Mail"` has a slash). Mirrors

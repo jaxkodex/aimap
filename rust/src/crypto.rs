@@ -30,6 +30,7 @@ pub fn generate_key() -> String {
 }
 
 /// `Cipher` in crypto.py. `Debug`/`Display` never reveal the keys.
+#[derive(Clone)]
 pub struct Cipher {
     f: MultiFernet,
 }

@@ -103,7 +103,7 @@ fn list_messages_pages_newest_first_with_cursor() {
     let store = MemoryS3::new();
     let mut cat = PgCatalog::new();
     let store = aimap::storage::Store::new(
-        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into() },
+        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into(), ..Default::default() },
         store,
     );
     for n in 1..=5u32 {
@@ -137,7 +137,7 @@ fn list_messages_pages_newest_first_with_cursor() {
 fn get_message_shapes_labels_reply_and_locations() {
     let db = TestDb::new();
     let store = aimap::storage::Store::new(
-        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into() },
+        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into(), ..Default::default() },
         MemoryS3::new(),
     );
     let mut cat = PgCatalog::new();
@@ -170,7 +170,7 @@ fn get_message_shapes_labels_reply_and_locations() {
 fn set_state_is_idempotent_and_undoable() {
     let db = TestDb::new();
     let store = aimap::storage::Store::new(
-        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into() },
+        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into(), ..Default::default() },
         MemoryS3::new(),
     );
     let mut cat = PgCatalog::new();
@@ -196,7 +196,7 @@ fn set_state_is_idempotent_and_undoable() {
 fn home_items_and_sorted_at() {
     let db = TestDb::new();
     let store = aimap::storage::Store::new(
-        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into() },
+        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into(), ..Default::default() },
         MemoryS3::new(),
     );
     let mut cat = PgCatalog::new();
@@ -217,7 +217,7 @@ fn home_items_and_sorted_at() {
 fn get_thread_reads_excerpts_from_s3() {
     let db = TestDb::new();
     let store = aimap::storage::Store::new(
-        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into() },
+        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into(), ..Default::default() },
         MemoryS3::new(),
     );
     let mut cat = PgCatalog::new();
@@ -239,7 +239,7 @@ fn get_thread_reads_excerpts_from_s3() {
 fn generate_draft_happy_path_end_to_end() {
     let db = TestDb::new();
     let store = aimap::storage::Store::new(
-        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into() },
+        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into(), ..Default::default() },
         MemoryS3::new(),
     );
     let mut cat = PgCatalog::new();
@@ -276,7 +276,7 @@ fn generate_draft_happy_path_end_to_end() {
 fn generate_draft_errors_match_the_api_contract() {
     let db = TestDb::new();
     let store = aimap::storage::Store::new(
-        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into() },
+        aimap::storage::S3Config { bucket: "b".into(), prefix: "t/".into(), ..Default::default() },
         MemoryS3::new(),
     );
     let mut cat = PgCatalog::new();

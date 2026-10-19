@@ -43,6 +43,11 @@ impl MemoryS3 {
         );
     }
 
+    /// Remove an object outright (moto's delete_object in the Python tests).
+    pub fn delete_object(&self, bucket: &str, key: &str) {
+        self.objects.lock().unwrap().remove(&(bucket.to_string(), key.to_string()));
+    }
+
     fn next_etag(&self) -> String {
         let n = self.etag_counter.fetch_add(1, Ordering::SeqCst);
         format!("\"etag-{n}\"")

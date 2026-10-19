@@ -32,7 +32,7 @@ fn main() {
         force_path_style: endpoint != "-",
     };
     let store = Store::new(
-        S3Config { bucket: bucket.clone(), prefix },
+        S3Config { bucket: bucket.clone(), prefix, ..Default::default() },
         HttpS3Client::new(bucket, settings),
     );
 

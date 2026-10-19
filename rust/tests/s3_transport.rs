@@ -116,7 +116,7 @@ fn sigv4_path_style_and_query_canonicalisation() {
 fn integration() -> Option<(Store<HttpS3Client>, String)> {
     let endpoint = std::env::var("AIMAP_S3_ENDPOINT").ok()?;
     let s = Store::new(
-        S3Config { bucket: "aimap-test".to_string(), prefix: "t/".to_string() },
+        S3Config { bucket: "aimap-test".to_string(), prefix: "t/".to_string(), ..Default::default() },
         HttpS3Client::new(
             "aimap-test",
             S3Settings {

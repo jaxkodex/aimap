@@ -13,7 +13,7 @@ use support::MemoryS3;
 
 fn store(prefix: &str) -> Store<MemoryS3> {
     Store::new(
-        S3Config { bucket: "aimap-test".to_string(), prefix: prefix.to_string() },
+        S3Config { bucket: "aimap-test".to_string(), prefix: prefix.to_string(), ..Default::default() },
         MemoryS3::new(),
     )
 }
@@ -218,7 +218,7 @@ fn s3_error_codes_surface() {
             Err(S3Error::new("AccessDenied"))
         }
     }
-    let s = Store::new(S3Config { bucket: "b".into(), prefix: "t/".into() }, Failing);
+    let s = Store::new(S3Config { bucket: "b".into(), prefix: "t/".into(), ..Default::default() }, Failing);
     assert!(matches!(s.check(), Err(S3Error { code }) if code == "AccessDenied"));
     assert!(matches!(s.get_bytes("t/x"), Err(S3Error { code }) if code == "AccessDenied"));
     assert!(matches!(s.head_etag("t/x"), Err(S3Error { code }) if code == "AccessDenied"));

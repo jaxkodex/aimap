@@ -8,6 +8,8 @@
 //! package, so both runtimes share exactly one schema source.
 
 use include_dir::{include_dir, Dir};
+use std::sync::{Condvar, Mutex};
+
 use postgres::{Client, GenericClient};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -173,5 +175,93 @@ impl From<SchemaError> for DbError {
 impl From<postgres::Error> for DbError {
     fn from(e: postgres::Error) -> Self {
         DbError::Postgres(e)
+    }
+}
+
+/// `open_pool` in db.py: a bounded pool of Postgres connections.
+///
+/// psycopg_pool grows lazily up to `max_size` and hands connections out
+/// round-robin; this one does the same with a mutex + condvar. Connections
+/// come back on drop (the `with pool.connection()` context in Python).
+pub struct Pool {
+    dsn: String,
+    inner: Mutex<PoolState>,
+    idle: Condvar,
+}
+
+struct PoolState {
+    idle: Vec<Client>,
+    total: usize,
+    max_size: usize,
+}
+
+/// A connection checked out of the pool. Returned automatically on drop.
+pub struct PooledConnection<'a> {
+    pool: &'a Pool,
+    client: Option<Client>,
+}
+
+impl std::ops::Deref for PooledConnection<'_> {
+    type Target = Client;
+    fn deref(&self) -> &Client {
+        self.client.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for PooledConnection<'_> {
+    fn deref_mut(&mut self) -> &mut Client {
+        self.client.as_mut().unwrap()
+    }
+}
+
+impl Drop for PooledConnection<'_> {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            let mut state = self.pool.inner.lock().unwrap();
+            state.idle.push(client);
+            self.pool.idle.notify_one();
+        }
+    }
+}
+
+impl Pool {
+    /// Open a pool with one warm connection (`min_size=1`, `pool.wait(30)`).
+    pub fn open(dsn: &str, max_size: usize) -> Result<Pool, postgres::Error> {
+        let pool = Pool {
+            dsn: dsn.to_string(),
+            inner: Mutex::new(PoolState { idle: Vec::new(), total: 0, max_size }),
+            idle: Condvar::new(),
+        };
+        drop(pool.get()?);
+        Ok(pool)
+    }
+
+    /// Check a connection out, creating one if the pool is below max_size,
+    /// blocking until another user returns one otherwise.
+    pub fn get(&self) -> Result<PooledConnection<'_>, postgres::Error> {
+        let mut state = self.inner.lock().unwrap();
+        loop {
+            if let Some(client) = state.idle.pop() {
+                return Ok(PooledConnection { pool: self, client: Some(client) });
+            }
+            if state.total < state.max_size {
+                state.total += 1;
+                match Client::connect(&self.dsn, postgres::NoTls) {
+                    Ok(client) => {
+                        return Ok(PooledConnection { pool: self, client: Some(client) });
+                    }
+                    Err(e) => {
+                        state.total -= 1;
+                        return Err(e);
+                    }
+                }
+            }
+            state = self.idle.wait(state).unwrap();
+        }
+    }
+
+    /// Number of connections currently open (idle + checked out).
+    pub fn size(&self) -> usize {
+        self.inner.lock().unwrap().total
     }
 }

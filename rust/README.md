@@ -12,14 +12,19 @@ tests plus golden fixtures (see below).
 | `crypto.py` | `src/crypto.rs` | `tests/crypto_unit.rs` + Python-generated Fernet vectors; bidirectionally verified with `cryptography` |
 | `jev.py` | `src/jev.rs` | `tests/jev_unit.rs` + goldens (questions, classifier keys, decisions, states) |
 | `draft.py` | `src/draft.rs` | `tests/draft_unit.rs` (pure) + `tests/inbox_draft_db.rs` (`generate_draft` end-to-end: real Postgres + S3 fake + model fake) |
-| `db.py` | `src/db.rs` | `tests/queue_db.rs` against real Postgres; migration SQL embedded from `src/aimap/migrations` via `include_dir!` |
+| `db.py` | `src/db.rs` | `tests/queue_db.rs` against real Postgres; migration SQL embedded from `src/aimap/migrations` via `include_dir!`; `open_pool` ported as `db::Pool` (mutex + condvar, connections return on drop) |
 | `queue.py` | `src/queue.rs` | `tests/queue_db.rs` on real Postgres, incl. the 4-thread claim race and SKIP LOCKED semantics |
 | `storage.py` | `src/storage.rs` + `src/s3.rs` | `tests/storage_unit.rs` (in-memory fake) + `tests/s3_transport.rs`: SigV4 golden vs a Python-computed signature, live HTTP integration against moto |
 | `catalog.py` | `src/catalog.rs` | `tests/catalog_db.rs` on real Postgres (idempotent batches, one-message-two-mailboxes, atomic rollback) |
 | `home.py` | `src/home.rs` | `tests/home_unit.rs` — full port of `test_home.py` |
 | `inbox.py` | `src/inbox.rs` | `tests/inbox_draft_db.rs` (needs_reply, cursors, paging, get_message/set_state/get_thread on real Postgres) |
-| `classifier.py` | — | needs config + a connection pool + wiring; all the `jev::decide` logic is already here |
-| `imap.py`, `ingest.py`, `accounts.py`, `config.py`, `worker.py`, `supervise.py` | — | remaining |
+| `config.py` | `src/config.rs` | `tests/config_unit.rs` (port of the config parts of `test_config.py`); full `S3Config` moved here and re-exported from `storage` |
+| `classifier.py` | `src/classifier.rs` | `tests/classifier_db.rs` — full port of `test_classifier.py`: drain/run_forever with `concurrency` worker threads over `db::Pool`, skip-on-same-key, retry-then-succeed, permanent S3 miss, reclaim of dead workers' jobs, stop-event shutdown. The model call sits behind the `Asker` trait (fakes, like the Python suite); the real TypeSafe transport is not ported (closed SDK — not installable here, and untested in Python too) |
+| `accounts.py` | `src/accounts.rs` | `tests/accounts_unit.rs` — full port of `test_accounts.py` + the env-account parts of `test_config.py`: env source with fallbacks and numeric suffix sorting, bucket file parse/dump (JSON shape byte-compatible), ETag-conditional writes with retry, last-good-copy on broken files, undecryptable accounts skipped |
+| `profiles.py` | `src/profiles.rs` | `tests/profiles_db.rs` on real Postgres (put/get/assign, patterns round-trip, validation, duplicates) + `parse_patterns` (JSON and a hand-rolled CSV reader pinned to Python's `csv` defaults) |
+| `ingest.py` | `src/ingest.rs` | `tests/ingest_db.rs` — full port of `test_ingest.py` against real Postgres + the S3 fake: first-sync window, incremental checkpoints, uidvalidity resync, per-batch commit + stop flag, vanished messages, legacy S3 checkpoint import. The mailbox sits behind the `MailSource` trait (fakes; the real IMAP client is the remaining half of `imap.py`) |
+| `imap.py` | — | real `ImapSource` over an IMAP client (the `MailSource` trait and `FetchedMessage` already live in `ingest.rs`); needs the rustls provider for port 993 |
+| `worker.py`, `supervise.py`, `cli.py`, `backfill.py`, `logs.py` | — | remaining (classifier/ingest/pool wiring is in place for the worker) |
 | `api.py`, `auth.py` | — | last (axum + Firebase JWT; HTTPS via a pure-Rust rustls provider) |
 
 Helper binaries (`cargo run --example …`): `dump` (message → meta/body JSON),
@@ -95,6 +100,19 @@ missed, each now pinned by `clean_text_trims_unicode_whitespace_like_python`:
   boundaries (`py_trim` in parse.rs).
 - Python `str.splitlines()` splits on `\v \f \x1c-\x1e \x85 U+2028 U+2029`
   (`py_splitlines` in parse.rs). U+2028 appears in real text/plain bodies.
+
+- `classifier.py`'s insert of `priority` goes through `f32` (the column is
+  `REAL`; the postgres crate wants an exact type match where psycopg relies on
+  implicit float8→float4 coercion).
+- `parse_patterns` reports JSON syntax errors as `ProfileError` (Python lets
+  `json.JSONDecodeError` propagate); CSV parsing is a hand-rolled reader
+  pinned to Python's `csv.reader` defaults, so exotic quoted forms may differ.
+- Account/profile validation messages format names with single quotes like
+  Python `repr`, but non-string JSON fields are stringified Rust-style
+  (`str(True)` → `"True"` is approximated only for booleans).
+- The classifier is silent: Python's `log.info`/`log.error` calls have no
+  counterpart yet (the rest of the port is silent too; a logging facade lands
+  with the worker port).
 
 The Postgres-backed modules (`db`, `queue`, `catalog`, `inbox`, draft's
 orchestration) run against a disposable real Postgres (`tools/dev-postgres.sh`,
