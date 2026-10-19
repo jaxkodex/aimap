@@ -50,9 +50,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup update stable && rustup target add x86_64-unknown-linux-musl
-      - run: pip install "moto[server]"
+      - run: docker run -d --name moto -p 5000:5000 motoserver/moto:latest
       - run: |
-          python -m moto.server -p 5000 &
           for i in $(seq 30); do curl -s -o /dev/null http://127.0.0.1:5000/ && exit 0; sleep 1; done
           echo "moto did not start" >&2
           exit 1
