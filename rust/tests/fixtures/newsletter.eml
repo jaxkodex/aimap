@@ -1,0 +1,32 @@
+From: Weekly Deals <deals@shop.example>
+To: me@example.com
+Subject: =?utf-8?B?V8O2Y2hlbnRsaWNoZXIgTmV3c2xldHRlcg==?=
+Date: Thu, 01 Jan 2026 09:00:00 -0500
+Message-ID: <nl-2026-01@shop.example>
+List-Unsubscribe: <https://shop.example/u?tok=1>
+Precedence: bulk
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b1"
+
+--b1
+Content-Type: multipart/alternative; boundary="b2"
+
+--b2
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hello & welcome to our newsletter
+See inside for deals.
+--b2
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
+
+PGh0bWw+PHN0eWxlPnh7fTwvc3R5bGU+PHA+SGVsbG8gJmFtcDsgd2VsY29tZSB0byBvdXIgbmV3c2xldHRlcjwvcD48cD5EZWFsOiA8YSBocmVmPSJodHRwczovL3guZXhhbXBsZS90cmFjayI+aHR0cHM6Ly94LmV4YW1wbGUvdHJhY2s8L2E+PC9wPjwvaHRtbD4=
+--b2--
+--b1
+Content-Type: image/png; name="logo.png"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="logo.png"
+
+iVBORw0KGgo=
+--b1--

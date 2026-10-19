@@ -5,7 +5,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
-# never commit downloaded mail
+# never commit downloaded mail (the synthetic fixtures under rust/tests are
+# the one exception — they pin the Rust parser's behaviour)
 data/
 *.eml
+!rust/tests/fixtures/*.eml
 node_modules/

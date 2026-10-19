@@ -1,0 +1,26 @@
+From: Big <big@example.com>
+To: me@example.com
+Subject: Files
+Date: Thu, 01 Jan 2026 08:00:00 +0000
+Message-ID: <files-1@big.example>
+Content-Type: multipart/mixed; boundary="bb"
+
+--bb
+Content-Type: text/plain
+
+See attached.
+--bb
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+
+JVBERi0=
+--bb
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="notes.txt"
+
+bm90ZXM=
+--bb
+Content-Type: application/zip; name="data.zip"
+
+VVRaSVA=
+--bb--
