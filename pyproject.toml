@@ -41,6 +41,7 @@ pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 120
+exclude = ["rust"]  # Rust-side tooling scripts are the Rust test suite's job, not ruff's
 target-version = "py311"
 
 [tool.ruff.lint]
