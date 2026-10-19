@@ -28,4 +28,12 @@ html-escape = "0.2"
 hmac = "0.12"
 percent-encoding = "2"
 
+# IMAP over TLS (port 993) and signals. rustls without default features has
+# no built-in provider; the RustCrypto one keeps the tree pure Rust, so the
+# musl static link stays C-compiler-free.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"
+webpki-roots = "0.26"
+libc = "0.2"
+
 [dev-dependencies]

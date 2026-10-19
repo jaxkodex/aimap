@@ -22,10 +22,14 @@ tests plus golden fixtures (see below).
 | `classifier.py` | `src/classifier.rs` | `tests/classifier_db.rs` — full port of `test_classifier.py`: drain/run_forever with `concurrency` worker threads over `db::Pool`, skip-on-same-key, retry-then-succeed, permanent S3 miss, reclaim of dead workers' jobs, stop-event shutdown. The model call sits behind the `Asker` trait (fakes, like the Python suite); the real TypeSafe transport is not ported (closed SDK — not installable here, and untested in Python too) |
 | `accounts.py` | `src/accounts.rs` | `tests/accounts_unit.rs` — full port of `test_accounts.py` + the env-account parts of `test_config.py`: env source with fallbacks and numeric suffix sorting, bucket file parse/dump (JSON shape byte-compatible), ETag-conditional writes with retry, last-good-copy on broken files, undecryptable accounts skipped |
 | `profiles.py` | `src/profiles.rs` | `tests/profiles_db.rs` on real Postgres (put/get/assign, patterns round-trip, validation, duplicates) + `parse_patterns` (JSON and a hand-rolled CSV reader pinned to Python's `csv` defaults) |
-| `ingest.py` | `src/ingest.rs` | `tests/ingest_db.rs` — full port of `test_ingest.py` against real Postgres + the S3 fake: first-sync window, incremental checkpoints, uidvalidity resync, per-batch commit + stop flag, vanished messages, legacy S3 checkpoint import. The mailbox sits behind the `MailSource` trait (fakes; the real IMAP client is the remaining half of `imap.py`) |
-| `imap.py` | — | real `ImapSource` over an IMAP client (the `MailSource` trait and `FetchedMessage` already live in `ingest.rs`); needs the rustls provider for port 993 |
-| `worker.py`, `supervise.py`, `cli.py`, `backfill.py`, `logs.py` | — | remaining (classifier/ingest/pool wiring is in place for the worker) |
-| `api.py`, `auth.py` | — | last (axum + Firebase JWT; HTTPS via a pure-Rust rustls provider) |
+| `ingest.py` | `src/ingest.rs` | `tests/ingest_db.rs` — full port of `test_ingest.py` against real Postgres + the S3 fake: first-sync window, incremental checkpoints, uidvalidity resync, per-batch commit + stop flag, vanished messages, legacy S3 checkpoint import. The mailbox sits behind the `MailSource` trait (`&mut dyn MailSource`; fakes in tests, `imap::ImapSource` in the worker) |
+| `imap.py` | `src/imap.rs` | hand-rolled IMAP4rev1 subset (LOGIN/EXAMINE/UID SEARCH/UID FETCH/LOGOUT, literals both ways) over rustls with the RustCrypto provider (port 993, pure Rust). Pinned by `tests/imap_wire.rs` against a scripted fake server wired through an in-memory pipe — loopback TCP proved unreliable in the sandbox (delayed/empty reads) |
+| `logs.py` | `src/logs.rs` | `tests/logs_unit.rs` — JSON/text record shapes, level filtering, a capture sink standing in for `caplog` |
+| `worker.py` | `src/worker.rs` | `tests/worker_db.rs` — full port of `test_worker.py` on real Postgres: per-account backoff, live add/remove/change, empty warning once, stop-aware run_forever. SIGTERM/SIGINT land via `src/signals.rs` (handler sets a flag, a watcher copies it into the stop event and the ingest stop flag) |
+| `backfill.py` | `src/backfill.rs` | `tests/backfill_db.rs` — unknown keys recorded through the ingestion catalog call, idempotent second run, skipped keys counted |
+| `supervise.py` | `src/supervise.rs` | `tests/supervise_unit.rs` — real child processes: one child exiting stops the others and passes its code (0 becomes 1), SIGTERM/SIGINT terminate the children, a SIGTERM-ignoring child is killed after the grace period |
+| `cli.py` | `src/cli.rs` + `src/main.rs` | `tests/cli_db.rs` — accounts commands on the S3 fake (add/list/update/disable/remove/set-password/rotate-key, login verification hook), DB admin commands on real Postgres (jobs status/retry, profiles/patterns, set-profile), backfill + jobs end-to-end, and the early exits (config 2, no DATABASE_URL 2, S3 3, migrate 4). `classify` and `api` refuse to start until the api batch ports the TypeSafe transport and axum/Firebase; `all` supervises the same three services |
+| `api.py`, `auth.py` | — | last (axum + Firebase JWT; HTTPS via the pure-Rust rustls provider already in the tree) |
 
 Helper binaries (`cargo run --example …`): `dump` (message → meta/body JSON),
 `cipher` (Fernet encrypt/decrypt/rotate/keygen), `s3-cli` (list/head/get
@@ -38,6 +42,18 @@ tools/dev-postgres.sh start                              # disposable PostgreSQL
 test -n "$TEST_DATABASE_URL" || eval "$(tools/dev-postgres.sh env)"
 cargo test          # unit + golden tests + real-Postgres tests
 cargo run --example dump < tests/fixtures/newsletter.eml
+```
+
+The binary is built by the same workspace: `cargo build` produces
+`target/x86_64-unknown-linux-musl/debug/aimap` (the port of `aimap -m aimap`).
+
+In a sandbox where the musl-hosted rustup proxies cannot run (they need
+`/lib/ld-musl-x86_64.so.1`), build with the gnu toolchain for the host and
+zig cc as its linker — the target artifacts stay musl-static either way:
+
+```sh
+export RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$HOME/.cargo/bin/zig-cc-gnu"
 ```
 
 `.cargo/config.toml` pins the `x86_64-unknown-linux-musl` target linked by

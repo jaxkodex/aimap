@@ -10,13 +10,16 @@ use aimap::storage::{
 use postgres::{Client, NoTls};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// In-memory S3, mimicking moto's behavior for the subset the Store uses.
-/// Keys are per bucket; etags are quoted counters like real S3.
+/// Keys are per bucket; etags are quoted counters like real S3. Cheap to
+/// clone: clones share the bucket, so a test and the Store see the same
+/// objects.
+#[derive(Clone)]
 pub struct MemoryS3 {
-    objects: Mutex<BTreeMap<(String, String), Obj>>,
-    etag_counter: AtomicU64,
+    objects: Arc<Mutex<BTreeMap<(String, String), Obj>>>,
+    etag_counter: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -30,8 +33,8 @@ struct Obj {
 impl MemoryS3 {
     pub fn new() -> Self {
         MemoryS3 {
-            objects: Mutex::new(BTreeMap::new()),
-            etag_counter: AtomicU64::new(1),
+            objects: Arc::new(Mutex::new(BTreeMap::new())),
+            etag_counter: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -46,6 +49,17 @@ impl MemoryS3 {
     /// Remove an object outright (moto's delete_object in the Python tests).
     pub fn delete_object(&self, bucket: &str, key: &str) {
         self.objects.lock().unwrap().remove(&(bucket.to_string(), key.to_string()));
+    }
+
+    /// Put an object with user metadata (the tests stand-in for boto3 put_object).
+    pub fn put_with_metadata(&self, bucket: &str, key: &str, body: &[u8], metadata: &[(&str, &str)]) {
+        let meta: Vec<(String, String)> =
+            metadata.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let etag = self.next_etag();
+        self.objects.lock().unwrap().insert(
+            (bucket.to_string(), key.to_string()),
+            Obj { body: body.to_vec(), etag, content_type: "application/octet-stream".into(), metadata: meta },
+        );
     }
 
     fn next_etag(&self) -> String {

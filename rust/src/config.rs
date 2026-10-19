@@ -406,11 +406,12 @@ pub fn load_settings_from_env(need_accounts: bool) -> Result<Settings, ConfigErr
     load_settings(&std::env::vars().collect(), need_accounts)
 }
 
-/// Minimal .env loader for local runs. Existing environment variables win.
-pub fn load_dotenv(path: &Path) {
+/// The variables a .env file would set (without applying them).
+pub fn read_dotenv(path: &Path) -> Vec<(String, String)> {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return;
+        return Vec::new();
     };
+    let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -428,7 +429,15 @@ pub fn load_dotenv(path: &Path) {
                 value = value[1..value.len() - 1].to_string();
             }
         }
-        if std::env::var(key).is_err() {
+        out.push((key.to_string(), value));
+    }
+    out
+}
+
+/// Minimal .env loader for local runs. Existing environment variables win.
+pub fn load_dotenv(path: &Path) {
+    for (key, value) in read_dotenv(path) {
+        if std::env::var(&key).is_err() {
             std::env::set_var(key, value);
         }
     }

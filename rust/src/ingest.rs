@@ -96,8 +96,8 @@ impl Default for SyncOptions<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn sync_mailbox<S: MailSource, C: S3Client>(
-    source: &mut S,
+pub fn sync_mailbox<C: S3Client>(
+    source: &mut dyn MailSource,
     store: &Store<C>,
     catalog: &mut PgCatalog,
     conn: &mut Client,
