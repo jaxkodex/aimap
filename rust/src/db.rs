@@ -10,6 +10,7 @@
 use include_dir::{include_dir, Dir};
 use std::sync::{Arc, Condvar, Mutex};
 
+use crate::logs::{LogValue, Logger};
 use postgres::{Client, GenericClient};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -87,13 +88,13 @@ pub fn pending(conn: &mut impl GenericClient) -> Result<Vec<Migration>, DbError>
 }
 
 /// Apply missing migrations. Returns the names of the ones applied.
-pub fn migrate(dsn: &str) -> Result<Vec<String>, DbError> {
+pub fn migrate(dsn: &str, log: &Logger) -> Result<Vec<String>, DbError> {
     let mut client = Client::connect(dsn, postgres::NoTls)?;
-    migrate_on(&mut client)
+    migrate_on(&mut client, log)
 }
 
 /// Same as [`migrate`] over an existing connection (tests, embedding).
-pub fn migrate_on(client: &mut Client) -> Result<Vec<String>, DbError> {
+pub fn migrate_on(client: &mut Client, log: &Logger) -> Result<Vec<String>, DbError> {
     let mut applied = Vec::new();
     // Session-level advisory lock; the connection stays in autocommit so each
     // migration commits on its own, exactly like db.migrate in Python.
@@ -119,7 +120,8 @@ pub fn migrate_on(client: &mut Client) -> Result<Vec<String>, DbError> {
                 return Err(e.into());
             }
         }
-        applied.push(m.name);
+        applied.push(m.name.clone());
+        log.info("migration applied", &[("migration", LogValue::str(m.name))]);
     }
     client.execute("SELECT pg_advisory_unlock($1)", &[&LOCK_ID])?;
     Ok(applied)

@@ -41,7 +41,7 @@ impl Fixture {
         AccountsRepo::new(&self.store, "config/accounts.json")
     }
     fn source(&self) -> BucketAccounts<'_, MemoryS3> {
-        BucketAccounts::new(self.repo(), self.cipher.clone())
+        BucketAccounts::new(self.repo(), self.cipher.clone(), aimap::logs::silent_logger("aimap.accounts"))
     }
 }
 
@@ -67,7 +67,7 @@ fn missing_file_is_empty() {
 fn file_has_no_plaintext_password() {
     let f = fixture();
     f.repo()
-        .modify(|d| d.records.push(record(&f.cipher, "a@x.com")), 3)
+        .modify(|d| d.records.push(record(&f.cipher, "a@x.com")), 3, &aimap::logs::silent_logger("aimap.accounts"))
         .unwrap();
     let (body, _) = f.store.get_bytes("t/config/accounts.json").unwrap().unwrap();
     let body = String::from_utf8(body).unwrap();
@@ -80,7 +80,7 @@ fn file_has_no_plaintext_password() {
 fn source_is_live_and_skips_disabled() {
     let f = fixture();
     let mut src = f.source();
-    f.repo().modify(|d| d.records.push(record(&f.cipher, "a")), 3).unwrap();
+    f.repo().modify(|d| d.records.push(record(&f.cipher, "a")), 3, &aimap::logs::silent_logger("aimap.accounts")).unwrap();
     assert_eq!(pairs(&mut src), vec![("a".to_string(), "pw-a".to_string())]);
     f.repo()
         .modify(
@@ -90,6 +90,7 @@ fn source_is_live_and_skips_disabled() {
                 d.records.push(r);
             },
             3,
+            &aimap::logs::silent_logger("aimap.accounts"),
         )
         .unwrap();
     assert_eq!(users(&mut src), vec!["a".to_string()]);
@@ -101,6 +102,7 @@ fn source_is_live_and_skips_disabled() {
                 r.touch();
             },
             3,
+            &aimap::logs::silent_logger("aimap.accounts"),
         )
         .unwrap();
     assert_eq!(users(&mut src), vec!["a".to_string(), "b".to_string()]);
@@ -155,8 +157,8 @@ fn source_only_rereads_when_etag_changes() {
     );
     let cipher = Cipher::new(&generate_key()).unwrap();
     let repo = AccountsRepo::new(&store, "config/accounts.json");
-    repo.modify(|d| d.records.push(record(&cipher, "a")), 3).unwrap();
-    let mut src = BucketAccounts::new(repo, cipher);
+    repo.modify(|d| d.records.push(record(&cipher, "a")), 3, &aimap::logs::silent_logger("aimap.accounts")).unwrap();
+    let mut src = BucketAccounts::new(repo, cipher, aimap::logs::silent_logger("aimap.accounts"));
     src.load();
     let reads = |store: &Store<CountingReads<MemoryS3>>| {
         store.client.reads.load(std::sync::atomic::Ordering::SeqCst)
@@ -179,6 +181,7 @@ fn undecryptable_account_skipped_others_kept() {
                 d.records.push(record(&other, "bad"));
             },
             3,
+            &aimap::logs::silent_logger("aimap.accounts"),
         )
         .unwrap();
     assert_eq!(users(&mut f.source()), vec!["good".to_string()]);
@@ -187,7 +190,7 @@ fn undecryptable_account_skipped_others_kept() {
 #[test]
 fn broken_file_keeps_last_good() {
     let f = fixture();
-    f.repo().modify(|d| d.records.push(record(&f.cipher, "a")), 3).unwrap();
+    f.repo().modify(|d| d.records.push(record(&f.cipher, "a")), 3, &aimap::logs::silent_logger("aimap.accounts")).unwrap();
     let mut src = f.source();
     assert_eq!(src.load().len(), 1);
     f.store.client.put_plain(BUCKET, &f.repo().key, b"{not json");
@@ -197,9 +200,9 @@ fn broken_file_keeps_last_good() {
 #[test]
 fn conditional_write_detects_concurrent_change() {
     let f = fixture();
-    f.repo().modify(|d| d.records.push(record(&f.cipher, "a")), 3).unwrap();
+    f.repo().modify(|d| d.records.push(record(&f.cipher, "a")), 3, &aimap::logs::silent_logger("aimap.accounts")).unwrap();
     let stale = f.repo().read().unwrap();
-    f.repo().modify(|d| d.records.push(record(&f.cipher, "b")), 3).unwrap();
+    f.repo().modify(|d| d.records.push(record(&f.cipher, "b")), 3, &aimap::logs::silent_logger("aimap.accounts")).unwrap();
     let err = f
         .store
         .put_bytes(&f.repo().key, &stale.dump(), "application/json", stale.etag.as_deref())
@@ -210,7 +213,7 @@ fn conditional_write_detects_concurrent_change() {
 #[test]
 fn modify_retries_after_conflict() {
     let f = fixture();
-    f.repo().modify(|d| d.records.push(record(&f.cipher, "a")), 3).unwrap();
+    f.repo().modify(|d| d.records.push(record(&f.cipher, "a")), 3, &aimap::logs::silent_logger("aimap.accounts")).unwrap();
     let repo = f.repo();
     let raced = RefCell::new(false);
     repo.modify(
@@ -218,11 +221,12 @@ fn modify_retries_after_conflict() {
             if !*raced.borrow() {
                 // another writer sneaks in between our read and write
                 *raced.borrow_mut() = true;
-                repo.modify(|d| d.records.push(record(&f.cipher, "b")), 3).unwrap();
+                repo.modify(|d| d.records.push(record(&f.cipher, "b")), 3, &aimap::logs::silent_logger("aimap.accounts")).unwrap();
             }
             doc.records.push(record(&f.cipher, "c"));
         },
         3,
+        &aimap::logs::silent_logger("aimap.accounts"),
     )
     .unwrap();
     let users: Vec<String> = repo.read().unwrap().records.iter().map(|r| r.user.clone()).collect();

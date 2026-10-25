@@ -161,7 +161,7 @@ impl TestDb {
     pub fn new() -> TestDb {
         let db = TestDb::new_no_migrate();
         let mut conn = db.connect();
-        aimap::db::migrate_on(&mut conn).expect("migrate test database");
+        aimap::db::migrate_on(&mut conn, &aimap::logs::silent_logger("aimap.db")).expect("migrate test database");
         db
     }
 

@@ -256,6 +256,7 @@ fn generate_draft_happy_path_end_to_end() {
         None,
         &draft_config(),
         jiff::Timestamp::from_second(1767225600).unwrap(),
+        &aimap::logs::silent_logger("aimap.draft"),
     )
     .unwrap();
 
@@ -287,12 +288,12 @@ fn generate_draft_errors_match_the_api_contract() {
     let mut cfg = draft_config();
     cfg.api_key = None;
     let model = FakeModel(json!({}));
-    let e = aimap::draft::generate_draft(&mut conn, &store, &model, mid, None, &cfg, jiff::Timestamp::MIN)
+    let e = aimap::draft::generate_draft(&mut conn, &store, &model, mid, None, &cfg, jiff::Timestamp::MIN, &aimap::logs::silent_logger("aimap.draft"))
         .unwrap_err();
     assert!(matches!(e, aimap::draft::GenerateError::Draft(DraftError::DraftingNotConfigured)));
 
     // unknown message
-    let e = aimap::draft::generate_draft(&mut conn, &store, &model, 999_999, None, &draft_config(), jiff::Timestamp::MIN)
+    let e = aimap::draft::generate_draft(&mut conn, &store, &model, 999_999, None, &draft_config(), jiff::Timestamp::MIN, &aimap::logs::silent_logger("aimap.draft"))
         .unwrap_err();
     assert!(matches!(e, aimap::draft::GenerateError::Draft(DraftError::MessageNotFound)));
 
@@ -300,6 +301,7 @@ fn generate_draft_errors_match_the_api_contract() {
     let e = aimap::draft::generate_draft(
         &mut conn, &store, &model, mid,
         Some(&"x".repeat(2001)), &draft_config(), jiff::Timestamp::MIN,
+        &aimap::logs::silent_logger("aimap.draft"),
     )
     .unwrap_err();
     assert!(matches!(e, aimap::draft::GenerateError::Draft(DraftError::InstructionsTooLong)));

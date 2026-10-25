@@ -486,6 +486,7 @@ fn create_draft<C: S3Client>(state: &AppState<C>, message_id: i64, body: &[u8]) 
         instructions,
         &config,
         jiff::Timestamp::now(),
+        &crate::logs::Logger { name: "aimap.draft".into(), ..state.log.clone() },
     );
     match result {
         Ok(draft) => ApiResponse::ok(draft),

@@ -156,6 +156,7 @@ fn first_sync_takes_only_the_most_recent() {
         "me@example.com",
         "INBOX",
         &SyncOptions { initial_fetch_count: 3, ..Default::default() },
+        &aimap::logs::silent_logger("aimap.ingest"),
     )
     .unwrap();
     assert_eq!(r.stored, 3);
@@ -185,14 +186,15 @@ fn incremental_sync_fetches_only_new() {
         "me",
         "INBOX",
         &SyncOptions { initial_fetch_count: 0, ..Default::default() },
+        &aimap::logs::silent_logger("aimap.ingest"),
     )
     .unwrap();
     box_.set_mailbox("INBOX", 7, vec![1, 2, 3, 4, 5]);
     box_.fetched.lock().unwrap().clear();
-    let r = sync_mailbox(&mut box_, &e.store, &mut e.catalog, &mut conn, "me", "INBOX", &opts()).unwrap();
+    let r = sync_mailbox(&mut box_, &e.store, &mut e.catalog, &mut conn, "me", "INBOX", &opts(), &aimap::logs::silent_logger("aimap.ingest")).unwrap();
     assert_eq!(*box_.fetched.lock().unwrap(), vec![4, 5]);
     assert_eq!(r.last_uid, 5);
-    let r = sync_mailbox(&mut box_, &e.store, &mut e.catalog, &mut conn, "me", "INBOX", &opts()).unwrap();
+    let r = sync_mailbox(&mut box_, &e.store, &mut e.catalog, &mut conn, "me", "INBOX", &opts(), &aimap::logs::silent_logger("aimap.ingest")).unwrap();
     assert_eq!(r.stored, 0);
 }
 
@@ -201,7 +203,7 @@ fn empty_mailbox_writes_checkpoint() {
     let mut e = env();
     let mut box_ = FakeMailbox::new(vec![("INBOX", 7, vec![])]);
     let mut conn = e.db.connect();
-    sync_mailbox(&mut box_, &e.store, &mut e.catalog, &mut conn, "me", "INBOX", &opts()).unwrap();
+    sync_mailbox(&mut box_, &e.store, &mut e.catalog, &mut conn, "me", "INBOX", &opts(), &aimap::logs::silent_logger("aimap.ingest")).unwrap();
     let cp = checkpoint(&mut e, "me", "INBOX");
     assert_eq!((cp.uidvalidity, cp.last_uid), (7, 0));
 }
@@ -219,6 +221,7 @@ fn uidvalidity_change_resyncs() {
         "me",
         "INBOX",
         &SyncOptions { initial_fetch_count: 0, ..Default::default() },
+        &aimap::logs::silent_logger("aimap.ingest"),
     )
     .unwrap();
     box_.set_mailbox("INBOX", 8, vec![1]);
@@ -230,6 +233,7 @@ fn uidvalidity_change_resyncs() {
         "me",
         "INBOX",
         &SyncOptions { initial_fetch_count: 0, ..Default::default() },
+        &aimap::logs::silent_logger("aimap.ingest"),
     )
     .unwrap();
     assert_eq!((r.stored, r.uidvalidity), (1, 8));
@@ -253,6 +257,7 @@ fn checkpoint_advances_per_batch_and_stop_is_honoured() {
         "me",
         "INBOX",
         &SyncOptions { initial_fetch_count: 0, batch_size: 3, stop: Some(&stop) },
+        &aimap::logs::silent_logger("aimap.ingest"),
     )
     .unwrap();
     assert!(r.interrupted);
@@ -274,6 +279,7 @@ fn vanished_message_is_skipped() {
         "me",
         "INBOX",
         &SyncOptions { initial_fetch_count: 0, ..Default::default() },
+        &aimap::logs::silent_logger("aimap.ingest"),
     )
     .unwrap();
     assert_eq!((r.stored, r.last_uid), (1, 2));
@@ -301,6 +307,7 @@ fn batches_are_recorded_with_the_checkpoint() {
         "me",
         "INBOX",
         &SyncOptions { initial_fetch_count: 0, batch_size: 2, ..Default::default() },
+        &aimap::logs::silent_logger("aimap.ingest"),
     )
     .unwrap();
     // 5 uids / batch size 2 -> three batches, last one advanced to uid 5
@@ -340,6 +347,7 @@ fn legacy_s3_checkpoint_is_imported_once() {
         "me",
         "INBOX",
         &SyncOptions { initial_fetch_count: 0, ..Default::default() },
+        &aimap::logs::silent_logger("aimap.ingest"),
     )
     .unwrap();
     assert_eq!(*box_.fetched.lock().unwrap(), vec![4, 5]);
@@ -354,6 +362,6 @@ fn select_failure_propagates() {
     let mut e = env();
     let mut box_ = FakeMailbox::new(vec![("INBOX", 7, vec![])]);
     let mut conn = e.db.connect();
-    let err = sync_mailbox(&mut box_, &e.store, &mut e.catalog, &mut conn, "me", "Archive", &opts()).unwrap_err();
+    let err = sync_mailbox(&mut box_, &e.store, &mut e.catalog, &mut conn, "me", "Archive", &opts(), &aimap::logs::silent_logger("aimap.ingest")).unwrap_err();
     assert!(err.to_string().contains("no mailbox Archive"), "{err}");
 }

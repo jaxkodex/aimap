@@ -380,7 +380,7 @@ pub fn main_with<C: S3Client + Send + Sync + Clone + 'static>(env: &HashMap<Stri
     };
 
     if command == Command::Migrate {
-        return match db::migrate(&database_url) {
+        return match db::migrate(&database_url, &log) {
             Ok(applied) => {
                 let suffix =
                     if applied.is_empty() { String::new() } else { format!(": {}", applied.join(", ")) };
@@ -507,6 +507,7 @@ fn service_command<C: S3Client + Send + Sync + Clone + 'static>(
                 stop: crate::classifier::StopEvent::new(),
                 idle_wait: 5.0,
                 reclaim_every: 60.0,
+                log: Logger { name: "aimap.classifier".into(), ..log.clone() },
             };
             classifier.install_signal_handlers();
             if *once {
@@ -518,7 +519,7 @@ fn service_command<C: S3Client + Send + Sync + Clone + 'static>(
             0
         }
         Command::Check => {
-            let mut source = match account_source(settings, &store, env) {
+            let mut source = match account_source(settings, &store, env, log) {
                 Ok(source) => source,
                 Err(e) => {
                     log.error("invalid accounts configuration", &[("error", LogValue::str(e))]);
@@ -529,7 +530,7 @@ fn service_command<C: S3Client + Send + Sync + Clone + 'static>(
             check(settings, &mut *source, hooks.verify_login, log)
         }
         Command::Once | Command::Run => {
-            let mut source = match account_source(settings, &store, env) {
+            let mut source = match account_source(settings, &store, env, log) {
                 Ok(source) => source,
                 Err(e) => {
                     log.error("invalid accounts configuration", &[("error", LogValue::str(e))]);
@@ -612,6 +613,7 @@ fn account_source<'a, C: S3Client>(
     settings: &Settings,
     store: &'a Store<C>,
     env: &HashMap<String, String>,
+    log: &Logger,
 ) -> Result<Box<dyn AccountSource + 'a>, String> {
     if settings.accounts_source == "env" {
         let source = EnvAccounts::new(env).map_err(|e| e.0)?;
@@ -619,7 +621,12 @@ fn account_source<'a, C: S3Client>(
     } else {
         let secret = settings.secret_key.clone().unwrap_or_default();
         let cipher = Cipher::new(&secret).map_err(|e| e.0)?;
-        Ok(Box::new(BucketAccounts::new(AccountsRepo::new(store, &settings.accounts_path), cipher)))
+        let accounts_log = Logger { name: "aimap.accounts".into(), ..log.clone() };
+        Ok(Box::new(BucketAccounts::new(
+            AccountsRepo::new(store, &settings.accounts_path),
+            cipher,
+            accounts_log,
+        )))
     }
 }
 
@@ -837,7 +844,7 @@ fn accounts_command<C: S3Client>(
     };
     let store = Store::new(settings.s3.clone(), (hooks.s3)(&settings.s3));
     let repo = AccountsRepo::new(&store, &settings.accounts_path);
-    match accounts_action(command, settings, &cipher, &repo, hooks) {
+    match accounts_action(command, settings, &cipher, &repo, hooks, log) {
         Ok(code) => code,
         Err(e) => {
             let _ = writeln!(hooks.err, "error: {}", String::from(e));
@@ -852,6 +859,7 @@ fn accounts_action<C: S3Client>(
     cipher: &Cipher,
     repo: &AccountsRepo<C>,
     hooks: &mut Hooks<C>,
+    log: &Logger,
 ) -> Result<i32, CliError> {
     match command {
         Command::AccountsList => {
@@ -932,6 +940,7 @@ fn accounts_action<C: S3Client>(
                     doc.records.push(record.clone());
                 },
                 3,
+                log,
             )?;
             if raced.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(AccountsError(format!("account '{user}' was added by someone else meanwhile")).into());
@@ -990,6 +999,7 @@ fn accounts_action<C: S3Client>(
                     rec.updated_at = crate::accounts::now_iso();
                 },
                 3,
+                log,
             )?;
             if missing.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(AccountsError(format!("no account '{user}'")).into());
@@ -1029,6 +1039,7 @@ fn accounts_action<C: S3Client>(
                     rec.updated_at = crate::accounts::now_iso();
                 },
                 3,
+                log,
             )?;
             if missing.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(AccountsError(format!("no account '{user}'")).into());
@@ -1036,8 +1047,8 @@ fn accounts_action<C: S3Client>(
             let _ = writeln!(hooks.out, "password updated for {user}");
             Ok(0)
         }
-        Command::AccountsEnable { user } => set_enabled(repo, user, true, hooks),
-        Command::AccountsDisable { user } => set_enabled(repo, user, false, hooks),
+        Command::AccountsEnable { user } => set_enabled(repo, user, true, hooks, log),
+        Command::AccountsDisable { user } => set_enabled(repo, user, false, hooks, log),
         Command::AccountsRemove { user } => {
             let user2 = user.clone();
             let missing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1051,6 +1062,7 @@ fn accounts_action<C: S3Client>(
                     }
                 },
                 3,
+                log,
             )?;
             if missing.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(AccountsError(format!("no account '{user}'")).into());
@@ -1074,6 +1086,7 @@ fn accounts_action<C: S3Client>(
                     }
                 },
                 3,
+                log,
             )?;
             if broken.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(crate::crypto::CryptoError("could not rotate every password".into()).into());
@@ -1093,6 +1106,7 @@ fn set_enabled<C: S3Client>(
     user: &str,
     enabled: bool,
     hooks: &mut Hooks<C>,
+    log: &Logger,
 ) -> Result<i32, CliError> {
     let user2 = user.to_string();
     let missing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1107,6 +1121,7 @@ fn set_enabled<C: S3Client>(
             rec.updated_at = crate::accounts::now_iso();
         },
         3,
+        log,
     )?;
     if missing.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(AccountsError(format!("no account '{user}'")).into());

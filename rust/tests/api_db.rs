@@ -236,6 +236,7 @@ impl Env {
             ME,
             "INBOX",
             &SyncOptions { initial_fetch_count: 0, ..Default::default() },
+            &aimap::logs::silent_logger("aimap.ingest"),
         )
         .expect("seed sync");
 
@@ -620,7 +621,7 @@ Jorge, can you please schedule the Solera interview for next week? Thanks, Javie
     {
         let mut conn = env.connect();
         sync_mailbox(&mut mailbox, &env.state.store, &mut catalog, &mut conn, ME, "INBOX",
-            &SyncOptions { initial_fetch_count: 0, ..Default::default() })
+            &SyncOptions { initial_fetch_count: 0, ..Default::default() }, &aimap::logs::silent_logger("aimap.ingest"))
             .expect("sync");
     }
     let reply_id: i64 = env

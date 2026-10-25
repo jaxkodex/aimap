@@ -127,9 +127,10 @@ missed, each now pinned by `clean_text_trims_unicode_whitespace_like_python`:
 - Account/profile validation messages format names with single quotes like
   Python `repr`, but non-string JSON fields are stringified Rust-style
   (`str(True)` → `"True"` is approximated only for booleans).
-- The classifier is silent: Python's `log.info`/`log.error` calls have no
-  counterpart yet (the rest of the port is silent too; a logging facade lands
-  with the worker port).
+- Python's `log.*` calls are mirrored record-for-record (message, level,
+  extras) by the `Logger` facade in `logs.rs`; tracebacks (`exc_info`) are not
+  reproduced, and a few `error` strings describe the failure Rust-side instead
+  of echoing Python exception text (`draft model response parse failed`).
 
 The Postgres-backed modules (`db`, `queue`, `catalog`, `inbox`, draft's
 orchestration) run against a disposable real Postgres (`tools/dev-postgres.sh`,

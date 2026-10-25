@@ -30,6 +30,7 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use crate::crypto::{Cipher, CryptoError};
+use crate::logs::{LogValue, Logger};
 use crate::storage::{S3Client, S3Error, Store, StoreError};
 
 pub const FILE_VERSION: i64 = 1;
@@ -465,6 +466,7 @@ impl<'a, C: S3Client> AccountsRepo<'a, C> {
         &self,
         change: impl Fn(&mut AccountsDoc),
         attempts: u32,
+        log: &Logger,
     ) -> Result<AccountsDoc, RepoError> {
         for i in 0..attempts {
             let mut doc = self.read()?;
@@ -475,7 +477,10 @@ impl<'a, C: S3Client> AccountsRepo<'a, C> {
                     return Ok(doc);
                 }
                 // someone else wrote first: retry with a fresh read
-                Err(StoreError::Conflict(_)) if i + 1 < attempts => continue,
+                Err(StoreError::Conflict(_)) if i + 1 < attempts => {
+                    log.info("accounts file changed during update, retrying", &[]);
+                    continue;
+                }
                 Err(e) => return Err(RepoError::Store(e)),
             }
         }
@@ -498,11 +503,13 @@ pub struct BucketAccounts<'a, C: S3Client> {
     pub cipher: Cipher,
     etag: SeenEtag,
     accounts: Vec<Account>,
+    /// named `aimap.accounts`, like `logging.getLogger(__name__)`
+    pub log: Logger,
 }
 
 impl<'a, C: S3Client> BucketAccounts<'a, C> {
-    pub fn new(repo: AccountsRepo<'a, C>, cipher: Cipher) -> BucketAccounts<'a, C> {
-        BucketAccounts { repo, cipher, etag: SeenEtag::Never, accounts: Vec::new() }
+    pub fn new(repo: AccountsRepo<'a, C>, cipher: Cipher, log: Logger) -> BucketAccounts<'a, C> {
+        BucketAccounts { repo, cipher, etag: SeenEtag::Never, accounts: Vec::new(), log }
     }
 
     /// The last good account list (never fails; unreadable files keep the
@@ -510,14 +517,14 @@ impl<'a, C: S3Client> BucketAccounts<'a, C> {
     pub fn load(&mut self) -> Vec<Account> {
         let etag = match self.repo.etag() {
             Ok(etag) => etag,
-            Err(_) => return self.accounts.clone(),
+            Err(e) => return self.last_good_copy(RepoError::from(e)),
         };
         if self.etag == SeenEtag::Loaded(etag.clone()) {
             return self.accounts.clone();
         }
         let doc = match self.repo.read() {
             Ok(doc) => doc,
-            Err(_) => return self.accounts.clone(),
+            Err(e) => return self.last_good_copy(e),
         };
         let mut accounts = Vec::new();
         for rec in &doc.records {
@@ -526,11 +533,35 @@ impl<'a, C: S3Client> BucketAccounts<'a, C> {
             }
             match rec.to_account(&self.cipher) {
                 Ok(a) => accounts.push(a),
-                Err(_) => continue, // skip undecryptable accounts
+                Err(e) => {
+                    self.log.error("skipping account", &[
+                        ("account", LogValue::str(rec.user.clone())),
+                        ("error", LogValue::str(e.to_string())),
+                    ]);
+                }
             }
         }
         self.etag = SeenEtag::Loaded(doc.etag);
         self.accounts = accounts;
+        self.log.info("accounts loaded", &[
+            ("key", LogValue::str(self.repo.key.clone())),
+            ("enabled", LogValue::List(self.accounts.iter().map(|a| a.user.clone()).collect())),
+            (
+                "disabled",
+                LogValue::List(doc.records.iter().filter(|r| !r.enabled).map(|r| r.user.clone()).collect()),
+            ),
+        ]);
+        self.accounts.clone()
+    }
+
+    /// `cannot read accounts file, using last good copy`: log the failure and
+    /// keep serving the previous list.
+    fn last_good_copy(&mut self, e: RepoError) -> Vec<Account> {
+        self.log.error("cannot read accounts file, using last good copy", &[
+            ("key", LogValue::str(self.repo.key.clone())),
+            ("error", LogValue::str(e.to_string())),
+            ("accounts", LogValue::Int(self.accounts.len() as i64)),
+        ]);
         self.accounts.clone()
     }
 }

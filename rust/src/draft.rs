@@ -11,6 +11,7 @@
 use serde_json::{json, Value};
 
 use crate::inbox;
+use crate::logs::{LogValue, Logger};
 use crate::pgtime::iso;
 use crate::storage::Store;
 
@@ -191,18 +192,33 @@ pub fn plan_model_call(config: &DraftConfig, prompt: &str) -> ModelCall {
 
 /// `data["choices"][0]["message"]["content"].strip()`, with empty bodies
 /// rejected the way generate_draft does.
-pub fn extract_reply(data: &Value) -> Result<String, DraftError> {
+pub fn extract_reply(data: &Value, log: &Logger) -> Result<String, DraftError> {
     let content = data
         .get("choices")
         .and_then(|c| c.get(0))
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            DraftError::ModelRequestFailed("The model response was invalid.".to_string())
-        })?;
+        .and_then(Value::as_str);
+    let Some(content) = content else {
+        // (KeyError | IndexError | JSONDecodeError) in Python
+        log.warning("draft model response parse failed", &[
+            ("error", LogValue::str("missing choices[0].message.content")),
+        ]);
+        return Err(DraftError::ModelRequestFailed("The model response was invalid.".to_string()));
+    };
     let body = content.trim().to_string();
     if body.is_empty() {
+        let finish_reason = data
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .map(|v| match v {
+                Value::Null => LogValue::Null,
+                Value::String(s) => LogValue::str(s.clone()),
+                other => LogValue::str(other.to_string()),
+            })
+            .unwrap_or(LogValue::Null);
+        log.warning("draft model returned empty body", &[("finish_reason", finish_reason)]);
         return Err(DraftError::ModelRequestFailed(
             "The model returned an empty reply.".to_string(),
         ));
@@ -288,6 +304,7 @@ impl From<DraftError> for GenerateError {
 /// The full `generate_draft`: message metadata and thread from Postgres,
 /// excerpts from S3, prompt, model call, and the draft the API returns.
 /// `now` is filled in as `created_at` by the caller's clock.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_draft<C: postgres::GenericClient, S: crate::storage::S3Client, T: ChatTransport + ?Sized>(
     conn: &mut C,
     store: &Store<S>,
@@ -296,10 +313,21 @@ pub fn generate_draft<C: postgres::GenericClient, S: crate::storage::S3Client, T
     instructions: Option<&str>,
     config: &DraftConfig,
     now: jiff::Timestamp,
+    log: &Logger,
 ) -> Result<Value, GenerateError> {
     if !config.is_configured() {
         return Err(DraftError::DraftingNotConfigured.into());
     }
+    let field_state = match instructions {
+        None => "missing",
+        Some("") => "empty",
+        Some(_) => "set",
+    };
+    log.info("draft requested", &[
+        ("instructions", LogValue::str(field_state)),
+        // Python len() counts code points, not bytes
+        ("instructions_chars", LogValue::Int(instructions.map_or(0, |s| s.chars().count()) as i64)),
+    ]);
     validate_instructions(instructions)?;
 
     let msg = inbox::get_message(conn, message_id).map_err(GenerateError::Db)?;
@@ -335,11 +363,12 @@ pub fn generate_draft<C: postgres::GenericClient, S: crate::storage::S3Client, T
     let call = plan_model_call(config, &prompt);
     let data = transport.post(&call).map_err(|e| match e {
         TransportError::Timeout => DraftError::ModelTimeout,
-        TransportError::Failed(_) => {
+        TransportError::Failed(m) => {
+            log.warning("draft model call failed", &[("error", LogValue::str(m.clone()))]);
             DraftError::ModelRequestFailed("The model request failed.".to_string())
         }
     })?;
-    let body = extract_reply(&data)?;
+    let body = extract_reply(&data, log)?;
 
     let subject = msg["subject"].as_str().map(str::to_string);
     let to: Vec<&str> = msg["from_email"].as_str().map(|s| vec![s]).unwrap_or_default();
@@ -373,6 +402,7 @@ pub fn complete_draft(
     needs_reply: bool,
     reply_reason: Option<&str>,
     thread: &[ThreadMessage],
+    log: &Logger,
 ) -> Result<Value, DraftError> {
     if !config.is_configured() {
         return Err(DraftError::DraftingNotConfigured);
@@ -388,11 +418,12 @@ pub fn complete_draft(
     let call = plan_model_call(config, &prompt);
     let data = transport.post(&call).map_err(|e| match e {
         TransportError::Timeout => DraftError::ModelTimeout,
-        TransportError::Failed(_) => {
+        TransportError::Failed(m) => {
+            log.warning("draft model call failed", &[("error", LogValue::str(m.clone()))]);
             DraftError::ModelRequestFailed("The model request failed.".to_string())
         }
     })?;
-    let body = extract_reply(&data)?;
+    let body = extract_reply(&data, log)?;
 
     let to: Vec<&str> = message_from_email.into_iter().collect();
     Ok(json!({

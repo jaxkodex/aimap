@@ -230,6 +230,7 @@ impl<'a, C: S3Client> Worker<'a, C> {
                 &acct.user,
                 &mailbox,
                 &options,
+                &Logger { name: "aimap.ingest".into(), ..self.log.clone() },
             )?;
             stored += result.stored;
         }

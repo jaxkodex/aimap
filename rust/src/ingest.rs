@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use postgres::Client;
 
 use crate::catalog::{PgCatalog, StoredMessage};
+use crate::logs::{LogValue, Logger};
 use crate::parse::{parse_internal_date, parse_meta};
 use crate::storage::{Checkpoint, Store, StoreError, S3Client};
 
@@ -104,11 +105,23 @@ pub fn sync_mailbox<C: S3Client>(
     account: &str,
     mailbox: &str,
     options: &SyncOptions<'_>,
+    log: &Logger,
 ) -> Result<SyncResult, SyncError> {
+    // the ctx every record carries (`extra=ctx | {...}` in Python)
+    let ctx = || vec![
+        ("account", LogValue::str(account.to_string())),
+        ("mailbox", LogValue::str(mailbox.to_string())),
+    ];
     let uidvalidity = source.select(mailbox)?;
     let mut cp = catalog.get_checkpoint(conn, account, mailbox)?;
     if cp.is_none() {
         if let Some(legacy) = store.legacy_checkpoint(account, mailbox)? {
+            log.info("imported checkpoint from S3", &{
+                let mut extra = ctx();
+                extra.push(("uidvalidity", LogValue::Int(legacy.uidvalidity)));
+                extra.push(("last_uid", LogValue::Int(legacy.last_uid)));
+                extra
+            });
             catalog.put_checkpoint(conn, account, mailbox, legacy.clone())?;
             cp = Some(legacy);
         }
@@ -118,6 +131,12 @@ pub fn sync_mailbox<C: S3Client>(
         if seen.uidvalidity != uidvalidity {
             // The server renumbered the mailbox. Old UIDs mean nothing now;
             // start over under the new UIDVALIDITY. Old objects stay put.
+            log.warning("uidvalidity changed, resyncing", &{
+                let mut extra = ctx();
+                extra.push(("old_uidvalidity", LogValue::Int(seen.uidvalidity)));
+                extra.push(("uidvalidity", LogValue::Int(uidvalidity)));
+                extra
+            });
             cp = None;
         }
     }
@@ -128,6 +147,12 @@ pub fn sync_mailbox<C: S3Client>(
             if options.initial_fetch_count > 0 && all.len() > options.initial_fetch_count {
                 all.drain(..all.len() - options.initial_fetch_count);
             }
+            log.info("first sync", &{
+                let mut extra = ctx();
+                extra.push(("uidvalidity", LogValue::Int(uidvalidity)));
+                extra.push(("to_fetch", LogValue::Int(all.len() as i64)));
+                extra
+            });
             if all.is_empty() {
                 catalog.put_checkpoint(conn, account, mailbox, Checkpoint { uidvalidity, last_uid: 0 })?;
             }
@@ -158,7 +183,10 @@ pub fn sync_mailbox<C: S3Client>(
         let mut batch: Vec<StoredMessage> = Vec::new();
         for &uid in &uids[start..end] {
             let Some(msg) = source.fetch(uid)? else {
-                continue; // message vanished before fetch
+                let mut extra = ctx();
+                extra.push(("uid", LogValue::Int(uid)));
+                log.info("message vanished before fetch", &extra);
+                continue;
             };
             let key = store.put_raw(
                 account,
@@ -185,6 +213,14 @@ pub fn sync_mailbox<C: S3Client>(
         catalog.record_batch(conn, account, mailbox, uidvalidity, &batch, Some(cp.clone()))?;
     }
 
+    if stored > 0 {
+        log.info("stored messages", &{
+            let mut extra = ctx();
+            extra.push(("stored", LogValue::Int(stored as i64)));
+            extra.push(("last_uid", LogValue::Int(cp.last_uid)));
+            extra
+        });
+    }
     Ok(SyncResult {
         account: account.to_string(),
         mailbox: mailbox.to_string(),

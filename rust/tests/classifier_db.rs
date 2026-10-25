@@ -150,6 +150,7 @@ impl Env {
             "me@example.com",
             "INBOX",
             &SyncOptions { initial_fetch_count: 0, ..Default::default() },
+            &aimap::logs::silent_logger("aimap.ingest"),
         )
         .unwrap();
         profile_put(&mut conn, "default", &profile()).unwrap();
@@ -182,6 +183,7 @@ fn make<'a>(
         stop: StopEvent::new(),
         idle_wait: 0.01,
         reclaim_every: 60.0,
+        log: aimap::logs::silent_logger("aimap.classifier"),
     }
 }
 

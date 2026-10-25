@@ -31,6 +31,7 @@ use serde_json::{Map, Value};
 use crate::config::ClassifierSettings;
 use crate::db::Pool;
 use crate::jev;
+use crate::logs::{LogValue, Logger};
 use crate::parse::MessageMeta;
 use crate::profiles;
 use crate::queue::{self, Job};
@@ -163,6 +164,8 @@ pub struct Classifier<'a, C: S3Client + Sync, F> {
     pub stop: StopEvent,
     pub idle_wait: f64,
     pub reclaim_every: f64,
+    /// named `aimap.classifier`, like `logging.getLogger(__name__)`
+    pub log: Logger,
 }
 
 impl<C: S3Client + Sync, F> Classifier<'_, C, F>
@@ -276,6 +279,14 @@ where
         )?;
         queue::complete(&mut tx, job.id)?;
         tx.commit()?;
+        self.log.info("classified", &[
+            ("message_id", LogValue::Int(job.message_id)),
+            ("account", LogValue::str(ctx.account.clone())),
+            ("importance", LogValue::str(d.importance.clone())),
+            ("action", LogValue::str(d.action_bucket.clone())),
+            ("source", LogValue::str(d.source.clone())),
+            ("needs_review", LogValue::Bool(d.needs_review)),
+        ]);
         Ok("classified")
     }
 
@@ -295,7 +306,14 @@ where
                 )
                 .expect("record failure")
             };
-            let _ = status; // logged in Python; the port is silent like the other modules
+            // Python adds a traceback via exc_info for unexpected errors; the
+            // record itself (message, level, extras) matches.
+            self.log.error("classify failed", &[
+                ("message_id", LogValue::Int(job.message_id)),
+                ("attempt", LogValue::Int(job.attempts as i64)),
+                ("status", LogValue::str(status)),
+                ("error", LogValue::str(e.to_string())),
+            ]);
         }
     }
 
@@ -309,8 +327,9 @@ where
         while !self.stop.is_set() {
             let job = match self.claim() {
                 Ok(job) => job,
-                Err(_) => {
-                    // "cannot claim job" — give up when draining
+                Err(e) => {
+                    self.log.error("cannot claim job", &[("error", LogValue::str(e.to_string()))]);
+                    // give up when draining
                     if !keep_going {
                         return;
                     }
@@ -335,12 +354,16 @@ where
     /// Put back jobs left `running` by a worker that died. Returns how many.
     pub fn reclaim(&self) -> Result<u64, postgres::Error> {
         let mut conn = self.pool.get()?;
-        queue::reclaim_stuck(
+        let n = queue::reclaim_stuck(
             &mut *conn,
             STAGE,
             self.settings.job_timeout,
             self.settings.max_attempts,
-        )
+        )?;
+        if n > 0 {
+            self.log.warning("reclaimed stuck jobs", &[("count", LogValue::Int(n as i64))]);
+        }
+        Ok(n)
     }
 
     fn run(&self, keep_going: bool) -> usize {
@@ -355,11 +378,18 @@ where
                     .stop
                     .wait_timeout(Duration::from_secs_f64(self.reclaim_every))
                 {
-                    // "cannot reclaim stuck jobs" — the next pass retries
-                    let _ = self.reclaim();
+                    if let Err(e) = self.reclaim() {
+                        // the next pass retries
+                        self.log
+                            .error("cannot reclaim stuck jobs", &[("error", LogValue::str(e.to_string()))]);
+                    }
                 }
             }
         });
+        if crate::signals::received() {
+            self.log
+                .info("shutdown requested", &[("signal", LogValue::str(crate::signals::last_name()))]);
+        }
         done.load(Ordering::SeqCst)
     }
 
@@ -369,7 +399,12 @@ where
     }
 
     pub fn run_forever(&self) {
+        self.log.info("classifier started", &[
+            ("model", LogValue::str(self.settings.model.clone())),
+            ("concurrency", LogValue::Int(self.settings.concurrency as i64)),
+        ]);
         self.run(true);
+        self.log.info("classifier stopped", &[]);
     }
 
     /// SIGTERM/SIGINT set the stop event (like the worker's; there is no

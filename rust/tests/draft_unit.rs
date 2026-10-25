@@ -151,6 +151,7 @@ fn happy_path_like_python_test() {
         true,
         Some("a real person is waiting"),
         &thread(),
+        &aimap::logs::silent_logger("aimap.draft"),
     )
     .unwrap();
     assert_eq!(out["message_id"], 42);
@@ -184,19 +185,19 @@ fn error_paths_match_python_messages() {
     let model = FakeModel(json!({
         "choices": [{"message": {"content": "   "}, "finish_reason": "length"}]
     }));
-    let e = complete_draft(&config(), &model, 1, None, None, None, false, None, &thread()).unwrap_err();
+    let e = complete_draft(&config(), &model, 1, None, None, None, false, None, &thread(), &aimap::logs::silent_logger("aimap.draft")).unwrap_err();
     assert_eq!(e, DraftError::ModelRequestFailed("The model returned an empty reply.".into()));
 
     let model = FakeModel(json!({"error": {"message": "boom"}}));
-    let e = complete_draft(&config(), &model, 1, None, None, None, false, None, &thread()).unwrap_err();
+    let e = complete_draft(&config(), &model, 1, None, None, None, false, None, &thread(), &aimap::logs::silent_logger("aimap.draft")).unwrap_err();
     assert_eq!(e.api_detail(), "The model response was invalid.");
 
     let model = FailingModel { error: TransportError::Timeout };
-    let e = complete_draft(&config(), &model, 1, None, None, None, false, None, &thread()).unwrap_err();
+    let e = complete_draft(&config(), &model, 1, None, None, None, false, None, &thread(), &aimap::logs::silent_logger("aimap.draft")).unwrap_err();
     assert_eq!(e, DraftError::ModelTimeout);
 
     let model = FailingModel { error: TransportError::Failed("connection refused".into()) };
-    let e = complete_draft(&config(), &model, 1, None, None, None, false, None, &thread()).unwrap_err();
+    let e = complete_draft(&config(), &model, 1, None, None, None, false, None, &thread(), &aimap::logs::silent_logger("aimap.draft")).unwrap_err();
     assert_eq!(e.api_detail(), "The model request failed.");
 }
 
@@ -211,12 +212,13 @@ fn not_configured_and_instructions_checked_before_call() {
     let mut cfg = config();
     cfg.api_key = None;
     assert!(!cfg.is_configured());
-    let e = complete_draft(&cfg, &PanicTransport, 1, None, None, None, false, None, &thread()).unwrap_err();
+    let e = complete_draft(&cfg, &PanicTransport, 1, None, None, None, false, None, &thread(), &aimap::logs::silent_logger("aimap.draft")).unwrap_err();
     assert_eq!(e, DraftError::DraftingNotConfigured);
 
     let e = complete_draft(
         &config(), &PanicTransport, 1,
         Some(&"x".repeat(2001)), None, None, false, None, &thread(),
+        &aimap::logs::silent_logger("aimap.draft"),
     )
     .unwrap_err();
     assert_eq!(e, DraftError::InstructionsTooLong);
@@ -225,7 +227,7 @@ fn not_configured_and_instructions_checked_before_call() {
 #[test]
 fn extract_reply_trims() {
     assert_eq!(
-        extract_reply(&json!({"choices": [{"message": {"content": "  hello \n"}}]})).unwrap(),
+        extract_reply(&json!({"choices": [{"message": {"content": "  hello \n"}}]}), &aimap::logs::silent_logger("aimap.draft")).unwrap(),
         "hello"
     );
 }

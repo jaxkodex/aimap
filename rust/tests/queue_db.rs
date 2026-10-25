@@ -159,7 +159,7 @@ fn migrations_are_ordered_and_numbered() {
 fn migrate_is_idempotent() {
     let db = TestDb::new(); // TestDb::new already migrated
     let mut conn = db.connect();
-    assert_eq!(db::migrate_on(&mut conn).unwrap(), Vec::<String>::new());
+    assert_eq!(db::migrate_on(&mut conn, &aimap::logs::silent_logger("aimap.db")).unwrap(), Vec::<String>::new());
     assert!(db::pending(&mut conn).unwrap().is_empty());
     let applied = db::applied_versions(&mut conn).unwrap();
     let all: std::collections::HashSet<i32> = db::migrations().unwrap().into_iter().map(|m| m.version).collect();
@@ -222,7 +222,7 @@ fn message_state_keeps_one_row_per_message_and_follows_it() {
 fn migrate_runs_on_a_fresh_dsn_via_string() {
     // db.migrate(dsn) over a fresh database, like the Python fixture does
     let fresh = TestDb::new_no_migrate();
-    let applied = db::migrate(&fresh.url()).unwrap();
+    let applied = db::migrate(&fresh.url(), &aimap::logs::silent_logger("aimap.db")).unwrap();
     let names: Vec<String> = db::migrations().unwrap().into_iter().map(|m| m.name).collect();
     assert_eq!(applied, names);
 }

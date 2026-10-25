@@ -48,6 +48,8 @@ pub enum LogValue {
     Float(f64),
     Bool(bool),
     List(Vec<String>),
+    /// Python `None` (renders as `null` in JSON, `None` in text).
+    Null,
 }
 
 impl LogValue {
@@ -66,6 +68,7 @@ impl LogValue {
                 let inner: Vec<String> = items.iter().map(|s| format!("'{s}'")).collect();
                 format!("[{}]", inner.join(", "))
             }
+            LogValue::Null => "None".to_string(),
         }
     }
 }
@@ -88,6 +91,7 @@ fn to_json(value: &LogValue) -> serde_json::Value {
         LogValue::List(items) => serde_json::Value::Array(
             items.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
         ),
+        LogValue::Null => serde_json::Value::Null,
     }
 }
 
@@ -197,6 +201,20 @@ impl Logger {
     pub fn error(&self, message: &str, extra: &[(&str, LogValue)]) {
         self.log(Level::Error, message, extra);
     }
+}
+
+/// A sink that throws every record away. For call sites (and tests) that do
+/// not assert on logs; the production `Logger` values arrive from `cli`.
+pub struct NullSink;
+
+impl Sink for NullSink {
+    fn write_record(&self, _: Level, _: &str, _: &str, _: &[(&str, LogValue)]) {}
+}
+
+/// A logger that discards everything (stand-in for the tests, and for
+/// embedding code that has no logging configured).
+pub fn silent_logger(name: impl Into<String>) -> Logger {
+    Logger { sink: Arc::new(NullSink), min: Level::Debug, name: name.into() }
 }
 
 /// Test stand-in for `caplog`: collects rendered messages (and their levels).
