@@ -1,6 +1,6 @@
 # Run locally
 
-With [uv](https://docs.astral.sh/uv/):
+With [uv](https://docs.astral.sh/uv/) (the Python package):
 
 ```sh
 uv sync
@@ -11,16 +11,25 @@ uv run aimap accounts add me@gmail.com --host imap.gmail.com
 uv run aimap all                               # needs JEV_API_KEY, FIREBASE_PROJECT_ID and AIMAP_ALLOWED_EMAILS
 ```
 
+The Rust port behaves identically. Build it once and swap it into the same
+commands:
+
+```sh
+cd rust && cargo build --release               # binary: target/x86_64-unknown-linux-musl/release/aimap
+./target/x86_64-unknown-linux-musl/release/aimap all
+```
+
 `aimap all` runs the worker, the classifier and the API together. To run
 them one at a time, use `aimap run`, `aimap classify` and `aimap api` in
 separate terminals.
 
 Without AWS, Docker Compose starts Postgres and [SeaweedFS](https://github.com/seaweedfs/seaweedfs)
 as a local S3 store, creates the bucket, applies the migrations and runs all
-three processes, each in its own container, with the API on http://localhost:8080:
+three processes, each in its own container, with the API on http://localhost:8080.
+The containers run the Rust image (`rust/Dockerfile`):
 
 ```sh
-echo "AIMAP_SECRET_KEY=$(docker run --rm $(docker build -q .) keygen)" > .env
+echo "AIMAP_SECRET_KEY=$(docker build -q -f rust/Dockerfile . | xargs docker run --rm) keygen" > .env
 echo "JEV_API_KEY=..." >> .env
 echo "FIREBASE_PROJECT_ID=..." >> .env
 echo "AIMAP_ALLOWED_EMAILS=me@gmail.com" >> .env

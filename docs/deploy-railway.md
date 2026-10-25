@@ -6,7 +6,8 @@ exits, the container stops and Railway restarts it.
 
 1. Create a project and add a service from this GitHub repo. Railway reads
    [`.railway/railway.ts`](../.railway/railway.ts), which defines the `aimap`
-   service, builds the `Dockerfile` and sets the `/healthz` healthcheck.
+   service, builds [`rust/Dockerfile`](../rust/Dockerfile) — the port as a
+   fully static Rust binary on Alpine — and sets the `/healthz` healthcheck.
 2. Add a bucket to the project, or use any S3-compatible bucket you already
    have. Add a Postgres database.
 3. On the service, set `S3_BUCKET`, `S3_ENDPOINT_URL`, `S3_REGION`,
@@ -15,7 +16,14 @@ exits, the container stops and Railway restarts it.
    `S3_BUCKET=${{Bucket.BUCKET}}`. The names on the right come from the
    bucket's Variables tab. Set `DATABASE_URL=${{Postgres.DATABASE_URL}}`.
 4. Set `AIMAP_SECRET_KEY` to the output of `aimap keygen`. Also store it in
-   your password manager.
+   your password manager. The CLI is the static binary from the image —
+   build it once on your machine and put it on your PATH:
+
+   ```sh
+   docker build -f rust/Dockerfile -t aimap .
+   docker run --rm aimap keygen              # or extract it:
+   docker create --name extract aimap && docker cp extract:/usr/local/bin/aimap . && docker rm extract
+   ```
 5. Set `JEV_API_KEY` for the classifier, and `FIREBASE_PROJECT_ID` and
    `AIMAP_ALLOWED_EMAILS` for the API. If any of these is missing, its child
    process exits at startup and takes the service down with it, so the deploy
@@ -29,7 +37,7 @@ exits, the container stops and Railway restarts it.
 
    ```sh
    railway link                                # pick the project and service
-   railway run uv run aimap accounts add me@gmail.com --host imap.gmail.com
+   railway run ./aimap accounts add me@gmail.com --host imap.gmail.com
    ```
 
    Or open a shell in the running container with `railway ssh` and run
@@ -37,7 +45,7 @@ exits, the container stops and Railway restarts it.
 
 The worker logs `account added` and `first sync` within one poll interval,
 with no redeploy. Set a profile with
-`railway run uv run aimap profiles set default --file profile.json`. If the
+`railway run ./aimap profiles set default --file profile.json`. If the
 bucket already holds mail from before Postgres, run `aimap backfill` once to
 queue it.
 

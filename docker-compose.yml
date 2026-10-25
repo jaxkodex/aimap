@@ -2,6 +2,9 @@
 # the classifier and the API, each in its own container (the image's default, `all`, runs
 # the three in one). IMAP and Jev settings come from .env; the S3 and database
 # settings below override anything there.
+#
+# Runs the Rust build (rust/Dockerfile): a static binary with the same CLI,
+# env vars and log output as the Python package.
 x-s3-env: &s3-env
   S3_BUCKET: aimap
   S3_ENDPOINT_URL: http://s3:8333
@@ -10,6 +13,9 @@ x-s3-env: &s3-env
   S3_SECRET_ACCESS_KEY: local
   S3_FORCE_PATH_STYLE: "true"
   DATABASE_URL: postgresql://aimap:aimap@postgres:5432/aimap
+
+x-build: &rust-build
+  build: { context: ., dockerfile: rust/Dockerfile }
 
 services:
   postgres:
@@ -26,7 +32,7 @@ services:
       retries: 30
 
   migrate:
-    build: .
+    build: *rust-build
     depends_on:
       postgres: { condition: service_healthy }
     environment: *s3-env
@@ -39,30 +45,27 @@ services:
     volumes: [s3data:/data]
 
   create-bucket:
-    build: .
+    image: amazon/aws-cli:latest
     depends_on: [s3]
-    environment: *s3-env
-    entrypoint: ["python", "-c"]
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        import os, time, boto3
-        s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT_URL"], region_name="us-east-1",
-                          aws_access_key_id="local", aws_secret_access_key="local")
-        for _ in range(60):  # wait for SeaweedFS to accept requests
-            try:
-                s3.create_bucket(Bucket="aimap")
-            except s3.exceptions.BucketAlreadyOwnedByYou:
-                pass
-            except Exception:
-                time.sleep(1)
-                continue
-            s3.head_bucket(Bucket="aimap")
-            break
-        else:
-            raise SystemExit("S3 not ready after 60s")
+        for i in $$(seq 1 60); do  # wait for SeaweedFS to accept requests
+          if aws --endpoint-url http://s3:8333 s3api create-bucket --bucket aimap 2>/dev/null; then
+            exit 0
+          fi
+          if aws --endpoint-url http://s3:8333 s3api head-bucket --bucket aimap 2>/dev/null; then
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "S3 not ready after 60s" >&2
+        exit 1
 
   worker:
-    build: .
+    build: *rust-build
     command: ["run"]
     depends_on:
       create-bucket: { condition: service_completed_successfully }
@@ -74,7 +77,7 @@ services:
     restart: unless-stopped
 
   classifier:
-    build: .
+    build: *rust-build
     command: ["classify"]
     depends_on:
       create-bucket: { condition: service_completed_successfully }
@@ -86,7 +89,7 @@ services:
     restart: unless-stopped
 
   api:
-    build: .
+    build: *rust-build
     command: ["api"]
     depends_on:
       create-bucket: { condition: service_completed_successfully }

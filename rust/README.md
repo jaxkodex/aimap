@@ -45,6 +45,10 @@ cargo test          # unit + golden tests + real-Postgres tests
 cargo run --example dump < tests/fixtures/newsletter.eml
 ```
 
+`rust/Dockerfile` builds the service image (context: the repo root): a
+release-built static binary on Alpine — the same image Railway and
+docker-compose deploy.
+
 The binary is built by the same workspace: `cargo build` produces
 `target/x86_64-unknown-linux-musl/debug/aimap` (the port of `aimap -m aimap`).
 
