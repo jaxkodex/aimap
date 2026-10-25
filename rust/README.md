@@ -12,7 +12,7 @@ tests plus golden fixtures (see below).
 | `crypto.py` | `src/crypto.rs` | `tests/crypto_unit.rs` + Python-generated Fernet vectors; bidirectionally verified with `cryptography` |
 | `jev.py` | `src/jev.rs` | `tests/jev_unit.rs` + goldens (questions, classifier keys, decisions, states) |
 | `draft.py` | `src/draft.rs` | `tests/draft_unit.rs` (pure) + `tests/inbox_draft_db.rs` (`generate_draft` end-to-end: real Postgres + S3 fake + model fake) |
-| `db.py` | `src/db.rs` | `tests/queue_db.rs` against real Postgres; migration SQL embedded from `src/aimap/migrations` via `include_dir!`; `open_pool` ported as `db::Pool` (mutex + condvar, connections return on drop) |
+| `db.py` | `src/db.rs` | `tests/queue_db.rs` against real Postgres; migration SQL embedded from `migrations/` in this crate via `include_dir!` (mirrored in `src/aimap/migrations` until the Python package goes away); `open_pool` ported as `db::Pool` (mutex + condvar, connections return on drop) |
 | `queue.py` | `src/queue.rs` | `tests/queue_db.rs` on real Postgres, incl. the 4-thread claim race and SKIP LOCKED semantics |
 | `storage.py` | `src/storage.rs` + `src/s3.rs` | `tests/storage_unit.rs` (in-memory fake) + `tests/s3_transport.rs`: SigV4 golden vs a Python-computed signature, live HTTP integration against moto |
 | `catalog.py` | `src/catalog.rs` | `tests/catalog_db.rs` on real Postgres (idempotent batches, one-message-two-mailboxes, atomic rollback) |

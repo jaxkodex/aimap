@@ -1,11 +1,13 @@
 //! Port of `src/aimap/db.py`: schema migrations.
 //!
-//! Migrations are numbered SQL files in `src/aimap/migrations` (0001_init.sql,
+//! Migrations are numbered SQL files in `migrations/` (0001_init.sql,
 //! 0002_...). `migrate` applies the missing ones in order, each in its own
 //! transaction, under an advisory lock so two deploys cannot run them at once.
 //! Applied versions are recorded in schema_migrations. The SQL files are
-//! embedded into the binary via `include_dir!` straight from the Python
-//! package, so both runtimes share exactly one schema source.
+//! embedded into the binary via `include_dir!` from this crate, so the Rust
+//! build no longer needs the Python tree. While the Python package is still
+//! around, `src/aimap/migrations` holds a mirror: add new migrations to both
+//! until it is removed (the Python side keeps working from its own copy).
 
 use include_dir::{include_dir, Dir};
 use std::sync::{Arc, Condvar, Mutex};
@@ -18,7 +20,7 @@ use std::sync::LazyLock;
 /// "aimap"
 const LOCK_ID: i64 = 0x61696D6170;
 
-static MIGRATIONS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../src/aimap/migrations");
+static MIGRATIONS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
 static FILE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{4})_[\w-]+\.sql$").unwrap());
 
