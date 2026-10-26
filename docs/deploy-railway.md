@@ -6,7 +6,7 @@ exits, the container stops and Railway restarts it.
 
 1. Create a project and add a service from this GitHub repo. Railway reads
    [`.railway/railway.ts`](../.railway/railway.ts), which defines the `aimap`
-   service, builds [`rust/Dockerfile`](../rust/Dockerfile) — the port as a
+   service, builds the root [`Dockerfile`](../Dockerfile) — the port as a
    fully static Rust binary on Alpine — and sets the `/healthz` healthcheck.
 2. Add a bucket to the project, or use any S3-compatible bucket you already
    have. Add a Postgres database.
@@ -20,7 +20,7 @@ exits, the container stops and Railway restarts it.
    build it once on your machine and put it on your PATH:
 
    ```sh
-   docker build -f rust/Dockerfile -t aimap .
+   docker build -t aimap .
    docker run --rm aimap keygen              # or extract it:
    docker create --name extract aimap && docker cp extract:/usr/local/bin/aimap . && docker rm extract
    ```

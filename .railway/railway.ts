@@ -16,7 +16,7 @@ export default defineRailway(() => {
   const aimap = service("aimap", {
     // Deploys on every push to main (the link the classify service used to have)
     source: github("jaxkodex/aimap"),
-    build: { builder: "DOCKERFILE", dockerfilePath: "rust/Dockerfile" },
+    build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     preDeploy: "aimap migrate",
     start: "aimap all",
     healthcheck: "/healthz",

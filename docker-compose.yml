@@ -3,7 +3,7 @@
 # the three in one). IMAP and Jev settings come from .env; the S3 and database
 # settings below override anything there.
 #
-# Runs the Rust build (rust/Dockerfile): a static binary with the same CLI,
+# Runs the Rust build (the root Dockerfile): a static binary with the same CLI,
 # env vars and log output as the Python package.
 x-s3-env: &s3-env
   S3_BUCKET: aimap
@@ -15,7 +15,7 @@ x-s3-env: &s3-env
   DATABASE_URL: postgresql://aimap:aimap@postgres:5432/aimap
 
 x-build: &rust-build
-  build: { context: ., dockerfile: rust/Dockerfile }
+  build: .
 
 services:
   postgres:

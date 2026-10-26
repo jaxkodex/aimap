@@ -45,7 +45,7 @@ cargo test          # unit + golden tests + real-Postgres tests
 cargo run --example dump < tests/fixtures/newsletter.eml
 ```
 
-`rust/Dockerfile` builds the service image (context: the repo root): a
+The root `Dockerfile` (context: the repo root) builds the service image: a
 release-built static binary on Alpine — the same image Railway and
 docker-compose deploy.
 

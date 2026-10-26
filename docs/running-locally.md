@@ -26,10 +26,10 @@ separate terminals.
 Without AWS, Docker Compose starts Postgres and [SeaweedFS](https://github.com/seaweedfs/seaweedfs)
 as a local S3 store, creates the bucket, applies the migrations and runs all
 three processes, each in its own container, with the API on http://localhost:8080.
-The containers run the Rust image (`rust/Dockerfile`):
+The containers run the Rust image (the root `Dockerfile`):
 
 ```sh
-echo "AIMAP_SECRET_KEY=$(docker build -q -f rust/Dockerfile . | xargs docker run --rm) keygen" > .env
+echo "AIMAP_SECRET_KEY=$(docker build -q . | xargs docker run --rm) keygen" > .env
 echo "JEV_API_KEY=..." >> .env
 echo "FIREBASE_PROJECT_ID=..." >> .env
 echo "AIMAP_ALLOWED_EMAILS=me@gmail.com" >> .env
